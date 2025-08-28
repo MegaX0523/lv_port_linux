@@ -1,160 +1,306 @@
-/*******************************************************************
- *
- * main.c - LVGL simulator for GNU/Linux
- *
- * Based on the original file from the repository
- *
- * @note eventually this file won't contain a main function and will
- * become a library supporting all major operating systems
- *
- * To see how each driver is initialized check the
- * 'src/lib/display_backends' directory
- *
- * - Clean up
- * - Support for multiple backends at once
- *   2025 EDGEMTech Ltd.
- *
- * Author: EDGEMTech Ltd, Erik Tagirov (erik.tagirov@edgemtech.ch)
- *
- ******************************************************************/
-#include <unistd.h>
-#include <pthread.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-
 #include "lvgl/lvgl.h"
 #include "lvgl/demos/lv_demos.h"
+#include <math.h>
+#include <unistd.h>
+#include <pthread.h>
+#include <time.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdint.h>
+#include <string.h>
 
-#include "src/lib/driver_backends.h"
-#include "src/lib/simulator_util.h"
-#include "src/lib/simulator_settings.h"
+#include "linux_msg.h"
 
-/* Internal functions */
-static void configure_simulator(int argc, char **argv);
-static void print_lvgl_version(void);
-static void print_usage(void);
+#define PI 3.14159265358979323846
+#define REFRESH_TIME 500 // 刷新周期
 
-/* contains the name of the selected backend if user
- * has specified one on the command line */
-static char *selected_backend;
+#define DISPLAY_DISPLAY_COUNT 200 // 显示据点个数
+#define Y_SCALE 1024              // Y轴缩放因子（实际值放大100倍处理浮点）
+#define CHART_WIDTH (LV_HOR_RES - 200)
+#define CHART_HEIGHT (LV_VER_RES - 300)
+#define CHART_BOTTOM_MARGIN 100
+#define GRID_X_COUNT 5 // X轴网格线数量
+#define GRID_Y_COUNT 4 // Y轴网格线数量
 
-/* Global simulator settings, defined in lv_linux_backend.c */
-extern simulator_settings_t settings;
+// 全局变量
+static lv_obj_t * chart;
+static lv_timer_t * update_timer;
+static lv_chart_series_t * ser;
+static lv_display_t * disp;
+extern bool has_new_array;
+extern int16_t sensor_array[200];
 
-
-/**
- * @brief Print LVGL version
- */
-static void print_lvgl_version(void)
+void get_sin_array(int16_t * array, size_t size, double frequency, double amplitude, double phase)
 {
-    fprintf(stdout, "%d.%d.%d-%s\n",
-            LVGL_VERSION_MAJOR,
-            LVGL_VERSION_MINOR,
-            LVGL_VERSION_PATCH,
-            LVGL_VERSION_INFO);
+    for(size_t i = 0; i < size; i++) {
+        double t = (double)i / (double)size;                                             // 归一化时间
+        array[i] = (int16_t)(amplitude * sin(2 * PI * frequency * t + phase) * Y_SCALE); // 放大Y轴
+    }
 }
 
-/**
- * @brief Print usage information
- */
-static void print_usage(void)
+// 波形图更新函数
+// LVGL的定时器回调函数必须遵循预定义的类型签名void (*lv_timer_cb_t)(lv_timer_t *timer)，无论函数内部是否使用参数
+void update_chart(lv_timer_t * timer)
 {
-    fprintf(stdout, "\nlvglsim [-V] [-B] [-b backend_name] [-W window_width] [-H window_height]\n\n");
-    fprintf(stdout, "-V print LVGL version\n");
-    fprintf(stdout, "-B list supported backends\n");
+    float voltage;
+    static int32_t converted_values[DISPLAY_DISPLAY_COUNT];
+
+    // 转换传感器数据
+    if(has_new_array == true) {
+        for(int i = 0; i < DISPLAY_DISPLAY_COUNT; i++) {
+            voltage             = (sensor_array[i] * 10.0f) / 32767.0f; // 32768 = 0x8000
+            converted_values[i] = (int32_t)(voltage * Y_SCALE);
+        }
+        has_new_array = false;
+
+        lv_chart_set_series_values(chart, ser, converted_values, DISPLAY_DISPLAY_COUNT);
+        lv_chart_refresh(chart);
+    }
 }
 
-/**
- * @brief Configure simulator
- * @description process arguments recieved by the program to select
- * appropriate options
- * @param argc the count of arguments in argv
- * @param argv The arguments
- */
-static void configure_simulator(int argc, char **argv)
+// 按钮事件处理
+void btn_event_handler(lv_event_t * e)
 {
-    int opt = 0;
+    lv_obj_t * btn     = lv_event_get_target(e);
+    const char * label = lv_label_get_text(lv_obj_get_child(btn, 0));
 
-    selected_backend = NULL;
-    driver_backends_register();
+    if(strcmp(label, "Start excitation") == 0) {
+        if(!update_timer) {
+            lv_timer_resume(update_timer);
+        }
+        send_msg(CMD_START_EXCITATION, 0, 0)
+    } else if(strcmp(label, "Stop excitation") == 0) {
+        if(update_timer) {
+            lv_timer_pause(update_timer);
+            update_timer = NULL;
+        }
+        send_msg(CMD_STOP_EXCITATION, 0, 0)
+    } else if(strcmp(label, "Start control") == 0) {
+        send_msg(CMD_START_CONTROL, 0, 0)
+    } else if(strcmp(label, "Stop control") == 0) {
+        send_msg(CMD_STOP_CONTROL, 0, 0)
+    }
+}
 
-    const char *env_w = getenv("LV_SIM_WINDOW_WIDTH");
-    const char *env_h = getenv("LV_SIM_WINDOW_HEIGHT");
-    /* Default values */
-    settings.window_width = atoi(env_w ? env_w : "800");
-    settings.window_height = atoi(env_h ? env_h : "480");
+void create_axis_labels()
+{
+    static lv_color_t color_red;
+    static lv_color_t color_blue;
+    static lv_color_t color_green;
+    static lv_color_t color_black;
 
-    /* Parse the command-line options. */
-    while ((opt = getopt (argc, argv, "b:fmW:H:BVh")) != -1) {
-        switch (opt) {
-        case 'h':
-            print_usage();
-            exit(EXIT_SUCCESS);
-            break;
-        case 'V':
-            print_lvgl_version();
-            exit(EXIT_SUCCESS);
-            break;
-        case 'B':
-            driver_backends_print_supported();
-            exit(EXIT_SUCCESS);
-            break;
-        case 'b':
-            if (driver_backends_is_supported(optarg) == 0) {
-                die("error no such backend: %s\n", optarg);
-            }
-            selected_backend = strdup(optarg);
-            break;
-        case 'W':
-            settings.window_width = atoi(optarg);
-            break;
-        case 'H':
-            settings.window_height = atoi(optarg);
-            break;
-        case ':':
-            print_usage();
-            die("Option -%c requires an argument.\n", optopt);
-            break;
-        case '?':
-            print_usage();
-            die("Unknown option -%c.\n", optopt);
+    color_red   = lv_color_hex(0xFF0000); // 红色
+    color_blue  = lv_color_hex(0x0000FF); // 蓝色
+    color_green = lv_color_hex(0x00FF00); // 绿色
+    color_black = lv_color_hex(0x000000); // 黑色
+    // 获取图表位置和尺寸
+    lv_area_t chart_area;
+    lv_obj_get_coords(chart, &chart_area);
+    printf("Chart area: x1=%d, y1=%d, x2=%d, y2=%d\n", chart_area.x1, chart_area.y1, chart_area.x2, chart_area.y2);
+
+    // 获取图表画布区域（排除边距）
+    lv_coord_t chart_width  = lv_area_get_width(&chart_area);
+    lv_coord_t chart_height = lv_area_get_height(&chart_area);
+
+    // 创建X轴标签
+    const char * x_labels[] = {"0", "40", "80", "120", "160", "200"};
+    for(int i = 0; i < 6; i++) {
+        lv_obj_t * label = lv_label_create(lv_scr_act());
+        lv_label_set_text(label, x_labels[i]);
+        // 计算X轴标签位置
+        lv_coord_t x_pos = chart_area.x1 + (chart_width * i / 5);
+        lv_coord_t y_pos = chart_area.y2 + 20;                        // 在图表下方20像素
+        lv_obj_set_pos(label, x_pos - 10, y_pos);                     // 调整微调位置
+        lv_obj_set_style_text_color(label, color_black, 0);           // 设置标签颜色
+        lv_obj_set_style_text_font(label, &lv_font_montserrat_20, 0); // 设置字体
+    }
+
+    // 创建Y轴标签
+    const char * y_labels[] = {"10", "5", "0", "-5", "-10"};
+    for(int i = 0; i < 5; i++) {
+        lv_obj_t * label = lv_label_create(lv_scr_act());
+        lv_label_set_text(label, y_labels[i]);
+        // 计算Y轴标签位置（从顶部开始计算）
+        lv_coord_t y_pos = chart_area.y1 + (chart_height * i / 4);
+        lv_obj_set_pos(label, chart_area.x1 - 30, y_pos - 10);        // 在图表左侧30像素
+        lv_obj_set_style_text_color(label, color_black, 0);           // 设置标签颜色
+        lv_obj_set_style_text_font(label, &lv_font_montserrat_20, 0); // 设置字体
+    }
+
+    // 添加轴标题
+    lv_obj_t * x_title = lv_label_create(lv_scr_act());
+    lv_label_set_text(x_title, "Time(ms)");
+    lv_obj_align_to(x_title, chart, LV_ALIGN_OUT_BOTTOM_MID, 0, 40);
+    lv_obj_set_style_text_color(x_title, color_black, 0);
+    lv_obj_set_style_text_font(x_title, &lv_font_montserrat_24, 0);
+
+    lv_obj_t * y_title = lv_label_create(lv_scr_act());
+    lv_label_set_text(y_title, "Voltage(V)");
+    lv_obj_align_to(y_title, chart, LV_ALIGN_OUT_LEFT_MID, -20, 0);
+    lv_obj_set_style_text_color(y_title, color_black, 0);
+    lv_obj_set_style_transform_angle(y_title, -900, 0); // 旋转90度
+    lv_obj_set_style_text_font(y_title, &lv_font_montserrat_24, 0);
+}
+
+void create_chart(void)
+{
+    // 创建图表对象
+    chart = lv_chart_create(lv_scr_act());
+    lv_obj_set_size(chart, CHART_WIDTH, CHART_HEIGHT);
+    lv_obj_align(chart, LV_ALIGN_BOTTOM_MID, 0, -CHART_BOTTOM_MARGIN);
+
+    // 设置图表类型为折线图,更新模式为CIRCULAR
+    lv_chart_set_type(chart, LV_CHART_TYPE_LINE);
+    lv_chart_set_update_mode(chart, LV_CHART_UPDATE_MODE_CIRCULAR);
+
+    // 设置网格线数量
+    lv_chart_set_div_line_count(chart, GRID_Y_COUNT + 1, GRID_X_COUNT + 1);
+    // 设置显示点数
+    lv_chart_set_point_count(chart, DISPLAY_DISPLAY_COUNT);
+
+    // 设置坐标轴轴范围
+    lv_chart_set_range(chart, LV_CHART_AXIS_PRIMARY_Y, -1.0 * Y_SCALE, 1.0 * Y_SCALE);
+    lv_chart_set_range(chart, LV_CHART_AXIS_PRIMARY_X, 0, DISPLAY_DISPLAY_COUNT);
+
+    // 添加数据系列（蓝色波形）
+    ser = lv_chart_add_series(chart, lv_palette_main(LV_PALETTE_RED), LV_CHART_AXIS_PRIMARY_Y);
+    lv_chart_set_all_value(chart, ser, 0);
+
+    lv_obj_update_layout(chart);
+    // 创建刻度标签
+    create_axis_labels();
+}
+
+void mouse_read(lv_indev_t * indev, lv_indev_data_t * data)
+{
+    static int16_t last_x        = 0;
+    static int16_t last_y        = 0;
+    static bool left_button_down = false;
+
+    struct input_event in;
+    static int fd = -1;
+
+    if(fd < 0) {
+        fd = open("/dev/input/mouse", O_RDONLY | O_NONBLOCK);
+        if(fd < 0) {
+            perror("Failed to open mouse device");
+            data->point.x = last_x;
+            data->point.y = last_y;
+            data->state   = LV_INDEV_STATE_RELEASED;
+            return;
         }
     }
+
+    while(read(fd, &in, sizeof(struct input_event)) > 0) {
+        if(in.type == EV_REL) {
+            if(in.code == REL_X)
+                last_x += in.value;
+            else if(in.code == REL_Y)
+                last_y += in.value;
+        } else if(in.type == EV_KEY && in.code == BTN_LEFT) {
+            left_button_down = (in.value != 0);
+        }
+    }
+
+    // 更新LVGL输入数据
+    data->point.x = last_x;
+    data->point.y = last_y;
+    data->state   = left_button_down ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED;
 }
 
-/**
- * @brief entry point
- * @description start a demo
- * @param argc the count of arguments in argv
- * @param argv The arguments
- */
-int main(int argc, char **argv)
+void input_init(void)
 {
+    // lv_indev_t * mouse_indev = lv_indev_create();
+    // lv_indev_set_type(mouse_indev, LV_INDEV_TYPE_POINTER);
+    // lv_indev_set_read_cb(mouse_indev, mouse_read);
 
-    configure_simulator(argc, argv);
+    lv_indev_t * mouse;
+    lv_obj_t cursor_obj;
 
-    /* Initialize LVGL. */
+    mouse = lv_evdev_create(LV_INDEV_TYPE_POINTER, "/dev/input/event0");
+    lv_indev_set_display(mouse, disp);
+    lv_indev_set_read_cb(mouse_indev, mouse);
+    LV_IMAGE_DECLARE(mouse_cursor_icon);
+    cursor_obj = lv_image_create(lv_screen_active());
+    lv_image_set_src(cursor_obj, &mouse_cursor_icon);
+    lv_indev_set_cursor(mouse, cursor_obj);
+}
+
+// 创建UI界面
+void create_botton_ui(void)
+{
+    // 创建按钮容器
+    lv_obj_t * btn_container = lv_obj_create(lv_scr_act());
+    lv_obj_set_size(btn_container, LV_HOR_RES - 200, 200);
+    lv_obj_set_flex_flow(btn_container, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(btn_container, LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_align(btn_container, LV_ALIGN_TOP_MID, 0, 10);
+
+    // 开始激励按钮
+    lv_obj_t * btn_start_excitation = lv_btn_create(btn_container);
+    lv_obj_set_size(btn_start_excitation, 200, 160);
+    lv_obj_add_event_cb(btn_start_excitation, btn_event_handler, LV_EVENT_CLICKED, NULL);
+    lv_obj_t * label_start_excitation = lv_label_create(btn_start_excitation);
+    lv_label_set_text(label_start_excitation, "Start excitation");                 // 设置文本
+    lv_obj_set_style_text_font(label_start_excitation, &lv_font_montserrat_20, 0); // 设置字体
+    lv_obj_center(label_start_excitation);                                         // 文本居中
+
+    // 结束激励按钮
+    lv_obj_t * btn_stop_excitation = lv_btn_create(btn_container);
+    lv_obj_set_size(btn_stop_excitation, 200, 160);
+    lv_obj_add_event_cb(btn_stop_excitation, btn_event_handler, LV_EVENT_CLICKED, NULL);
+    lv_obj_t * label_stop_excitation = lv_label_create(btn_stop_excitation);
+    lv_label_set_text(label_stop_excitation, "Stop excitation");
+    lv_obj_set_style_text_font(label_stop_excitation, &lv_font_montserrat_20, 0);
+    lv_obj_center(label_stop_excitation);
+
+    // 开始控制按钮
+    lv_obj_t * btn_start_control = lv_btn_create(btn_container);
+    lv_obj_set_size(btn_start_control, 200, 160);
+    lv_obj_add_event_cb(btn_start_control, btn_event_handler, LV_EVENT_CLICKED, NULL);
+    lv_obj_t * label_start_control = lv_label_create(btn_start_control);
+    lv_label_set_text(label_start_control, "Start control");
+    lv_obj_set_style_text_font(label_start_control, &lv_font_montserrat_20, 0);
+    lv_obj_center(label_start_control);
+
+    // 结束控制按钮
+    lv_obj_t * btn_stop_control = lv_btn_create(btn_container);
+    lv_obj_set_size(btn_stop_control, 200, 160);
+    lv_obj_add_event_cb(btn_stop_control, btn_event_handler, LV_EVENT_CLICKED, NULL);
+    lv_obj_t * label_stop_control = lv_label_create(btn_stop_control);
+    lv_label_set_text(label_stop_control, "Stop excitation");
+    lv_obj_set_style_text_font(label_stop_control, &lv_font_montserrat_20, 0);
+    lv_obj_center(label_stop_control);
+
+
+}
+
+// 主函数
+int main(void)
+{
+    // 初始化LVGL
     lv_init();
 
-    /* Initialize the configured backend */
-    if (driver_backends_init_backend(selected_backend) == -1) {
-        die("Failed to initialize display backend");
+    disp = lv_linux_fbdev_create();
+    lv_linux_fbdev_set_file(disp, "/dev/fb0");
+
+    // 创建UI界面
+    create_botton_ui();
+    create_chart();
+
+    update_timer = lv_timer_create(update_chart, REFRESH_TIME, NULL);
+    lv_timer_enable(update_timer); // 启动定时器
+
+    printf("UI created successfully.\n");
+    printf("LV_HOR_RES=%d, LV_VER_RES =%d\n", LV_HOR_RES, LV_VER_RES);
+
+    start_rpmsg();
+
+    // 主循环
+    while(1) {
+        lv_timer_handler();
+        usleep(500);
     }
-
-    /* Enable for EVDEV support */
-#if LV_USE_EVDEV
-    if (driver_backends_init_backend("EVDEV") == -1) {
-        die("Failed to initialize evdev");
-    }
-#endif
-
-    /*Create a Demo*/
-    lv_demo_widgets();
-    lv_demo_widgets_start_slideshow();
-
-    /* Enter the run loop of the selected backend */
-    driver_backends_run_loop();
 
     return 0;
 }
