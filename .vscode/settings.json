@@ -1,0 +1,7 @@
+{
+    "files.associations": {
+        "*.dts": "c",
+        "*.ld": "c",
+        "linux_msg.h": "c"
+    }
+}

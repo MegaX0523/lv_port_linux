@@ -8,8 +8,13 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
-
+#include <linux/input.h>
+#include <sys/ioctl.h>
+#include <fcntl.h>
 #include "linux_msg.h"
+
+#define USING_MOUSE 0
+#define USING_TOUCHSCREEN 1
 
 #define PI 3.14159265358979323846
 #define REFRESH_TIME 500 // 刷新周期
@@ -21,6 +26,7 @@
 #define CHART_BOTTOM_MARGIN 100
 #define GRID_X_COUNT 5 // X轴网格线数量
 #define GRID_Y_COUNT 4 // Y轴网格线数量
+#define TOUCH_DEBOUNCE_MS 20
 
 // 全局变量
 static lv_obj_t * chart;
@@ -29,6 +35,25 @@ static lv_chart_series_t * ser;
 static lv_display_t * disp;
 extern bool has_new_array;
 extern int16_t sensor_array[200];
+
+typedef struct
+{
+    int fd;
+    int32_t min_x;
+    int32_t max_x;
+    int32_t min_y;
+    int32_t max_y;
+    bool calibrated;
+} TouchpadData;
+
+static TouchpadData touchpad = {
+    .fd = -1,
+    .min_x = 0,
+    .max_x = 0,
+    .min_y = 0,
+    .max_y = 0,
+    .calibrated = false
+};
 
 void get_sin_array(int16_t * array, size_t size, double frequency, double amplitude, double phase)
 {
@@ -65,20 +90,24 @@ void btn_event_handler(lv_event_t * e)
     const char * label = lv_label_get_text(lv_obj_get_child(btn, 0));
 
     if(strcmp(label, "Start excitation") == 0) {
-        if(!update_timer) {
-            lv_timer_resume(update_timer);
-        }
-        send_msg(CMD_START_EXCITATION, 0, 0)
+        // if(!update_timer) {
+        //     lv_timer_resume(update_timer);
+        // }
+        // send_msg(CMD_START_EXCITATION, 0, 0)
+        printf("Start excitation\n");
     } else if(strcmp(label, "Stop excitation") == 0) {
-        if(update_timer) {
-            lv_timer_pause(update_timer);
-            update_timer = NULL;
-        }
-        send_msg(CMD_STOP_EXCITATION, 0, 0)
+        // if(update_timer) {
+        //     lv_timer_pause(update_timer);
+        //     update_timer = NULL;
+        // }
+        // send_msg(CMD_STOP_EXCITATION, 0, 0);
+        printf("Stop excitation\n");
     } else if(strcmp(label, "Start control") == 0) {
-        send_msg(CMD_START_CONTROL, 0, 0)
+        // send_msg(CMD_START_CONTROL, 0, 0);
+        printf("Start control\n");
     } else if(strcmp(label, "Stop control") == 0) {
-        send_msg(CMD_STOP_CONTROL, 0, 0)
+        // send_msg(CMD_STOP_CONTROL, 0, 0);
+        printf("Stop control\n");
     }
 }
 
@@ -129,13 +158,13 @@ void create_axis_labels()
 
     // 添加轴标题
     lv_obj_t * x_title = lv_label_create(lv_scr_act());
-    lv_label_set_text(x_title, "Time(ms)");
+    lv_label_set_text(x_title, "Time (ms)");
     lv_obj_align_to(x_title, chart, LV_ALIGN_OUT_BOTTOM_MID, 0, 40);
     lv_obj_set_style_text_color(x_title, color_black, 0);
     lv_obj_set_style_text_font(x_title, &lv_font_montserrat_24, 0);
 
     lv_obj_t * y_title = lv_label_create(lv_scr_act());
-    lv_label_set_text(y_title, "Voltage(V)");
+    lv_label_set_text(y_title, "Voltage (V)");
     lv_obj_align_to(y_title, chart, LV_ALIGN_OUT_LEFT_MID, -20, 0);
     lv_obj_set_style_text_color(y_title, color_black, 0);
     lv_obj_set_style_transform_angle(y_title, -900, 0); // 旋转90度
@@ -171,8 +200,60 @@ void create_chart(void)
     create_axis_labels();
 }
 
-void mouse_read(lv_indev_t * indev, lv_indev_data_t * data)
+// 自动校准触摸屏范围
+bool touchpad_auto_calibrate(void)
 {
+    struct input_absinfo abs_info;
+
+    // 获取X轴范围
+    if(ioctl(touchpad.fd, EVIOCGABS(ABS_X), &abs_info) < 0) {
+        perror("Failed to get X range");
+        return false;
+    }
+    touchpad.min_x = abs_info.minimum;
+    touchpad.max_x = abs_info.maximum;
+
+    // 获取Y轴范围
+    if(ioctl(touchpad.fd, EVIOCGABS(ABS_Y), &abs_info) < 0) {
+        perror("Failed to get Y range");
+        return false;
+    }
+    touchpad.min_y = abs_info.minimum;
+    touchpad.max_y = abs_info.maximum;
+
+    touchpad.calibrated = true;
+    return true;
+}
+
+// 初始化触摸屏
+bool touchpad_init(void)
+{
+    touchpad.fd = open("/dev/input/event1", O_RDONLY | O_NONBLOCK);
+    if(touchpad.fd < 0) {
+        perror("Failed to open touchpad device");
+        return false;
+    }
+
+    // 尝试自动获取触摸屏范围
+    if(touchpad_auto_calibrate()) {
+        printf("Touchpad auto-calibrated: X(%d-%d), Y(%d-%d)\n", touchpad.min_x, touchpad.max_x, touchpad.min_y,
+               touchpad.max_y);
+    } else {
+        // 使用默认值（常见触摸屏范围）
+        touchpad.min_x      = 0;
+        touchpad.max_x      = 4095;
+        touchpad.min_y      = 0;
+        touchpad.max_y      = 4095;
+        touchpad.calibrated = false;
+        printf("Using default touchpad range: X(0-4095), Y(0-4095)\n");
+    }
+
+    return true;
+}
+
+void indev_callback(lv_indev_t * indev, lv_indev_data_t * data)
+{
+#if USING_MOUSE
     static int16_t last_x        = 0;
     static int16_t last_y        = 0;
     static bool left_button_down = false;
@@ -206,24 +287,83 @@ void mouse_read(lv_indev_t * indev, lv_indev_data_t * data)
     data->point.x = last_x;
     data->point.y = last_y;
     data->state   = left_button_down ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED;
+#elif USING_TOUCHSCREEN
+    static int16_t last_x           = 0;
+    static int16_t last_y           = 0;
+    static bool touched             = false;
+    static uint32_t last_touch_time = 0;
+
+    struct input_event in;
+
+    if(touchpad.fd < 0 && !touchpad_init()) {
+        data->point.x = last_x;
+        data->point.y = last_y;
+        data->state   = touched ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED;
+        return;
+    }
+
+    // 读取所有事件
+    while(read(touchpad.fd, &in, sizeof(struct input_event)) > 0) {
+        if(in.type == EV_ABS) {
+            if(in.code == ABS_X) {
+                // 使用校准数据映射X坐标
+                if(touchpad.calibrated) {
+                    last_x = ((in.value - touchpad.min_x) * LV_HOR_RES) / (touchpad.max_x - touchpad.min_x);
+                } else {
+                    // 默认映射（假设常见范围）
+                    last_x = (in.value * LV_HOR_RES) / 4096;
+                }
+
+                // 边界检查
+                last_x = LV_CLAMP(0, last_x, LV_HOR_RES - 1);
+            } else if(in.code == ABS_Y) {
+                // 使用校准数据映射Y坐标
+                if(touchpad.calibrated) {
+                    last_y = ((in.value - touchpad.min_y) * LV_VER_RES) / (touchpad.max_y - touchpad.min_y);
+                } else {
+                    // 默认映射（假设常见范围）
+                    last_y = (in.value * LV_VER_RES) / 4096;
+                }
+
+                // 边界检查
+                last_y = LV_CLAMP(0, last_y, LV_VER_RES - 1);
+            }
+        } else if(in.type == EV_KEY && in.code == BTN_TOUCH) {
+            // 应用消抖逻辑
+            bool raw_touched = (in.value != 0);
+            if(raw_touched != touched && lv_tick_elaps(last_touch_time) > TOUCH_DEBOUNCE_MS) {
+                touched         = raw_touched;
+                last_touch_time = lv_tick_get();
+            }
+        }
+    }
+
+    // 更新LVGL数据
+    data->point.x = last_x;
+    data->point.y = last_y;
+    data->state   = touched ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED;
+#endif
 }
 
-void input_init(void)
+void input_evdev_init(void)
 {
-    // lv_indev_t * mouse_indev = lv_indev_create();
-    // lv_indev_set_type(mouse_indev, LV_INDEV_TYPE_POINTER);
-    // lv_indev_set_read_cb(mouse_indev, mouse_read);
-
+#if USING_MOUSE
     lv_indev_t * mouse;
     lv_obj_t cursor_obj;
 
     mouse = lv_evdev_create(LV_INDEV_TYPE_POINTER, "/dev/input/event0");
     lv_indev_set_display(mouse, disp);
-    lv_indev_set_read_cb(mouse_indev, mouse);
+    lv_indev_set_read_cb(mouse_indev, indev_callback);
     LV_IMAGE_DECLARE(mouse_cursor_icon);
     cursor_obj = lv_image_create(lv_screen_active());
     lv_image_set_src(cursor_obj, &mouse_cursor_icon);
     lv_indev_set_cursor(mouse, cursor_obj);
+#elif USING_TOUCHSCREEN
+    lv_indev_t * touch = lv_evdev_create(LV_INDEV_TYPE_POINTER, "/dev/input/event0");
+    lv_indev_set_display(touch, disp);
+    lv_indev_set_read_cb(touch, indev_callback)
+
+#endif
 }
 
 // 创建UI界面
@@ -271,8 +411,6 @@ void create_botton_ui(void)
     lv_label_set_text(label_stop_control, "Stop excitation");
     lv_obj_set_style_text_font(label_stop_control, &lv_font_montserrat_20, 0);
     lv_obj_center(label_stop_control);
-
-
 }
 
 // 主函数
