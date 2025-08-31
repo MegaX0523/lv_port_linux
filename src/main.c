@@ -70,6 +70,8 @@ void update_chart(lv_timer_t * timer)
     float voltage;
     static int32_t converted_values[DISPLAY_DISPLAY_COUNT];
 
+    (void)timer;
+
     // 转换传感器数据
     if(has_new_array == true) {
         for(int i = 0; i < DISPLAY_DISPLAY_COUNT; i++) {
@@ -113,14 +115,14 @@ void btn_event_handler(lv_event_t * e)
 
 void create_axis_labels()
 {
-    static lv_color_t color_red;
-    static lv_color_t color_blue;
-    static lv_color_t color_green;
+    // static lv_color_t color_red;
+    // static lv_color_t color_blue;
+    // static lv_color_t color_green;
     static lv_color_t color_black;
 
-    color_red   = lv_color_hex(0xFF0000); // 红色
-    color_blue  = lv_color_hex(0x0000FF); // 蓝色
-    color_green = lv_color_hex(0x00FF00); // 绿色
+    // color_red   = lv_color_hex(0xFF0000); // 红色
+    // color_blue  = lv_color_hex(0x0000FF); // 蓝色
+    // color_green = lv_color_hex(0x00FF00); // 绿色
     color_black = lv_color_hex(0x000000); // 黑色
     // 获取图表位置和尺寸
     lv_area_t chart_area;
@@ -228,7 +230,7 @@ bool touchpad_auto_calibrate(void)
 // 初始化触摸屏
 bool touchpad_init(void)
 {
-    touchpad.fd = open("/dev/input/event1", O_RDONLY | O_NONBLOCK);
+    touchpad.fd = open("/dev/input/touchscreen0", O_RDONLY | O_NONBLOCK);
     if(touchpad.fd < 0) {
         perror("Failed to open touchpad device");
         return false;
@@ -295,6 +297,8 @@ void indev_callback(lv_indev_t * indev, lv_indev_data_t * data)
 
     struct input_event in;
 
+    (void)indev;
+
     if(touchpad.fd < 0 && !touchpad_init()) {
         data->point.x = last_x;
         data->point.y = last_y;
@@ -359,9 +363,9 @@ void input_evdev_init(void)
     lv_image_set_src(cursor_obj, &mouse_cursor_icon);
     lv_indev_set_cursor(mouse, cursor_obj);
 #elif USING_TOUCHSCREEN
-    lv_indev_t * touch = lv_evdev_create(LV_INDEV_TYPE_POINTER, "/dev/input/event0");
+    lv_indev_t * touch = lv_evdev_create(LV_INDEV_TYPE_POINTER, "/dev/input/touchscreen0");
     lv_indev_set_display(touch, disp);
-    lv_indev_set_read_cb(touch, indev_callback)
+    lv_indev_set_read_cb(touch, indev_callback);
 
 #endif
 }
@@ -371,45 +375,45 @@ void create_botton_ui(void)
 {
     // 创建按钮容器
     lv_obj_t * btn_container = lv_obj_create(lv_scr_act());
-    lv_obj_set_size(btn_container, LV_HOR_RES - 200, 200);
+    lv_obj_set_size(btn_container, LV_HOR_RES - 200, 160);
     lv_obj_set_flex_flow(btn_container, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(btn_container, LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_align(btn_container, LV_ALIGN_TOP_MID, 0, 10);
 
     // 开始激励按钮
     lv_obj_t * btn_start_excitation = lv_btn_create(btn_container);
-    lv_obj_set_size(btn_start_excitation, 200, 160);
+    lv_obj_set_size(btn_start_excitation, 200, 120);
     lv_obj_add_event_cb(btn_start_excitation, btn_event_handler, LV_EVENT_CLICKED, NULL);
     lv_obj_t * label_start_excitation = lv_label_create(btn_start_excitation);
     lv_label_set_text(label_start_excitation, "Start excitation");                 // 设置文本
-    lv_obj_set_style_text_font(label_start_excitation, &lv_font_montserrat_20, 0); // 设置字体
+    lv_obj_set_style_text_font(label_start_excitation, &lv_font_montserrat_22, 0); // 设置字体
     lv_obj_center(label_start_excitation);                                         // 文本居中
 
     // 结束激励按钮
     lv_obj_t * btn_stop_excitation = lv_btn_create(btn_container);
-    lv_obj_set_size(btn_stop_excitation, 200, 160);
+    lv_obj_set_size(btn_stop_excitation, 200, 120);
     lv_obj_add_event_cb(btn_stop_excitation, btn_event_handler, LV_EVENT_CLICKED, NULL);
     lv_obj_t * label_stop_excitation = lv_label_create(btn_stop_excitation);
     lv_label_set_text(label_stop_excitation, "Stop excitation");
-    lv_obj_set_style_text_font(label_stop_excitation, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_font(label_stop_excitation, &lv_font_montserrat_22, 0);
     lv_obj_center(label_stop_excitation);
 
     // 开始控制按钮
     lv_obj_t * btn_start_control = lv_btn_create(btn_container);
-    lv_obj_set_size(btn_start_control, 200, 160);
+    lv_obj_set_size(btn_start_control, 200, 120);
     lv_obj_add_event_cb(btn_start_control, btn_event_handler, LV_EVENT_CLICKED, NULL);
     lv_obj_t * label_start_control = lv_label_create(btn_start_control);
     lv_label_set_text(label_start_control, "Start control");
-    lv_obj_set_style_text_font(label_start_control, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_font(label_start_control, &lv_font_montserrat_22, 0);
     lv_obj_center(label_start_control);
 
     // 结束控制按钮
     lv_obj_t * btn_stop_control = lv_btn_create(btn_container);
-    lv_obj_set_size(btn_stop_control, 200, 160);
+    lv_obj_set_size(btn_stop_control, 200, 120);
     lv_obj_add_event_cb(btn_stop_control, btn_event_handler, LV_EVENT_CLICKED, NULL);
     lv_obj_t * label_stop_control = lv_label_create(btn_stop_control);
-    lv_label_set_text(label_stop_control, "Stop excitation");
-    lv_obj_set_style_text_font(label_stop_control, &lv_font_montserrat_20, 0);
+    lv_label_set_text(label_stop_control, "Stop control");
+    lv_obj_set_style_text_font(label_stop_control, &lv_font_montserrat_22, 0);
     lv_obj_center(label_stop_control);
 }
 
@@ -425,6 +429,7 @@ int main(void)
     // 创建UI界面
     create_botton_ui();
     create_chart();
+    input_evdev_init();
 
     update_timer = lv_timer_create(update_chart, REFRESH_TIME, NULL);
     lv_timer_enable(update_timer); // 启动定时器
@@ -432,7 +437,7 @@ int main(void)
     printf("UI created successfully.\n");
     printf("LV_HOR_RES=%d, LV_VER_RES =%d\n", LV_HOR_RES, LV_VER_RES);
 
-    start_rpmsg();
+    // start_rpmsg();
 
     // 主循环
     while(1) {

@@ -1,6 +1,5 @@
-#pragma once
-
-int32_t buffer[200] = {0};
+#ifndef LINUX_MSG_H
+#define LINUX_MSG_H
 
 typedef enum {
     CMD_START_EXCITATION = 1,
@@ -13,4 +12,6 @@ typedef enum {
 } cmd;
 
 int start_rpmsg(void);
-int send_msg(int cmd_type, uint16_t param_id, double param_value);
+int send_msg(int cmd_type, u_int16_t param_id, double param_value);
+
+#endif // LINUX_MSG_H

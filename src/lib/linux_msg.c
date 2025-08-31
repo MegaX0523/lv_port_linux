@@ -8,6 +8,7 @@
 #include <errno.h>
 #include <string.h>
 #include <sys/poll.h>
+#include "linux_msg.h"
 #include "rpmsg_protocol.h"
 
 #define MSG_PATH "/dev/ttyRPMSG0"
@@ -47,7 +48,7 @@ int set_tty_raw(int fd)
     return 0;
 }
 
-int send_msg(int cmd_type, uint16_t param_id, double param_value)
+int send_msg(int cmd_type, u_int16_t param_id, double param_value)
 {
     rpmsg_packet pkt;
     size_t pkt_size = 0;
@@ -61,7 +62,7 @@ int send_msg(int cmd_type, uint16_t param_id, double param_value)
         {
             pkt.msg_type        = MSG_COMMAND;
             pkt.payload.command = START_EXCITATION;
-            pkt_size            = sizeof(pkt.msg_type) + sizeof(uint16_t);
+            pkt_size            = sizeof(pkt.msg_type) + sizeof(u_int16_t);
             printf("Sending: Start excitation...\n");
             break;
         }
@@ -69,7 +70,7 @@ int send_msg(int cmd_type, uint16_t param_id, double param_value)
         {
             pkt.msg_type        = MSG_COMMAND;
             pkt.payload.command = STOP_EXCITATION;
-            pkt_size            = sizeof(pkt.msg_type) + sizeof(uint16_t);
+            pkt_size            = sizeof(pkt.msg_type) + sizeof(u_int16_t);
             printf("Sending: Stop excitation...\n");
             break;
         }
@@ -77,7 +78,7 @@ int send_msg(int cmd_type, uint16_t param_id, double param_value)
         {
             pkt.msg_type        = MSG_COMMAND;
             pkt.payload.command = START_CONTROL;
-            pkt_size            = sizeof(pkt.msg_type) + sizeof(uint16_t);
+            pkt_size            = sizeof(pkt.msg_type) + sizeof(u_int16_t);
             printf("Sending: Start control...\n");
             break;
         }
@@ -85,7 +86,7 @@ int send_msg(int cmd_type, uint16_t param_id, double param_value)
         {
             pkt.msg_type        = MSG_COMMAND;
             pkt.payload.command = STOP_CONTROL;
-            pkt_size            = sizeof(pkt.msg_type) + sizeof(uint16_t);
+            pkt_size            = sizeof(pkt.msg_type) + sizeof(u_int16_t);
             printf("Sending: Stop control...\n");
             break;
         }
@@ -102,7 +103,7 @@ int send_msg(int cmd_type, uint16_t param_id, double param_value)
         {
             pkt.msg_type        = MSG_COMMAND;
             pkt.payload.command = START_DAMPING; // 假设START_DAMPING用于请求数据
-            pkt_size            = sizeof(pkt.msg_type) + sizeof(uint16_t);
+            pkt_size            = sizeof(pkt.msg_type) + sizeof(u_int16_t);
             printf("Sending: Sensor array request...\n");
             break;
         }
@@ -158,7 +159,7 @@ void * cmd_send_thread_func(void * arg)
         if(cmd != 5) {
             send_msg(cmd, 0, 0);
         } else {
-            uint16_t param_id;
+            u_int16_t param_id;
             double param_value;
 
             printf("Enter parameter ID (1: step size, 2: frequency): ");
@@ -181,7 +182,7 @@ void * cmd_send_thread_func(void * arg)
 void * get_array_thread_func(void * arg)
 {
     struct pollfd fds     = {.fd = rpmsg_fd, .events = POLLIN};
-    const size_t pkt_size = sizeof(uint16_t) + sizeof(SensorArray);
+    const size_t pkt_size = sizeof(u_int16_t) + sizeof(SensorArray);
     uint8_t recv_buffer[sizeof(rpmsg_packet) * 2];
     size_t bytes_received = 0;
 
@@ -207,9 +208,9 @@ void * get_array_thread_func(void * arg)
 
         bytes_received += (size_t)n;
 
-        while(bytes_received >= sizeof(uint16_t)) {
-            uint16_t msg_type;
-            memcpy(&msg_type, recv_buffer, sizeof(uint16_t));
+        while(bytes_received >= sizeof(u_int16_t)) {
+            u_int16_t msg_type;
+            memcpy(&msg_type, recv_buffer, sizeof(u_int16_t));
 
             if(msg_type != MSG_SENSOR_ARRAY) {
                 printf("Unknown message type: 0x%04X\n", msg_type);
