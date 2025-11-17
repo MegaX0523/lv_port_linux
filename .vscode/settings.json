@@ -2,6 +2,7 @@
     "files.associations": {
         "*.dts": "c",
         "*.ld": "c",
-        "linux_msg.h": "c"
+        "linux_msg.h": "c",
+        "lv_demos.h": "c"
     }
 }

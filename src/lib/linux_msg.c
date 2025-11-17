@@ -12,13 +12,15 @@
 #include "rpmsg_protocol.h"
 
 #define MSG_PATH "/dev/ttyRPMSG0"
-#define TEST_PRINT
+// #define TEST_PRINT
 
 // 全局变量
 int rpmsg_fd;
-bool has_new_array           = false;
-pthread_mutex_t g_mutex_lock = PTHREAD_MUTEX_INITIALIZER; // 保护send_msg调用
-int16_t sensor_array[200] = {0};
+bool has_new_ref_signal       = false;
+bool has_new_err_signal       = false;
+pthread_mutex_t g_mutex_lock  = PTHREAD_MUTEX_INITIALIZER; // 保护send_msg调用
+int16_t ref_signal_array[200] = {0};
+int16_t err_signal_array[200] = {0};
 
 // 设置TTY为原始模式
 int set_tty_raw(int fd)
@@ -190,12 +192,10 @@ void * get_array_thread_func(void * arg)
     (void)arg;
 
     while(1) {
-        if(poll(&fds, 1, 100) <= 0) {
+        if(poll(&fds, 1, -1) <= 0) {
             if(errno != EINTR) perror("poll error");
             continue;
         }
-
-        if(!(fds.revents & POLLIN)) continue;
 
         ssize_t n = read(rpmsg_fd, recv_buffer + bytes_received, sizeof(recv_buffer) - bytes_received);
         if(n <= 0) {
@@ -205,42 +205,53 @@ void * get_array_thread_func(void * arg)
                 perror("Read error");
             break;
         }
-
         bytes_received += (size_t)n;
+
+        static bool warn_printed = false;
 
         while(bytes_received >= sizeof(u_int16_t)) {
             u_int16_t msg_type;
             memcpy(&msg_type, recv_buffer, sizeof(u_int16_t));
 
-            if(msg_type != MSG_SENSOR_ARRAY) {
-                printf("Unknown message type: 0x%04X\n", msg_type);
+            if(msg_type != MSG_REF_ARRAY && msg_type != MSG_ERR_ARRAY) {
+                if(!warn_printed) {
+                    printf("WARNING: Unknown message type: 0x%04X (data may be misaligned)\n", msg_type);
+                    warn_printed = true; // 置为true，后续不再打印
+                }
                 memmove(recv_buffer, recv_buffer + 1, --bytes_received);
                 continue;
-                // printf("Unknown message type: 0x%04X, discarding all received data\n", msg_type);
-                // bytes_received = 0;
-                // break;
             }
+
+            warn_printed = false; // 重置警告打印标志
 
             if(bytes_received < pkt_size) break;
 
             rpmsg_packet pkt;
             memcpy(&pkt, recv_buffer, pkt_size);
+            if(msg_type == MSG_REF_ARRAY) {
+                int wait = 10000;
+                while(has_new_ref_signal == true) {
+                    wait--;
+                    if(wait < 0) {
+                        printf("WARNING: array processing unfinished!");
+                        break;
+                    }
+                }
+                memcpy(ref_signal_array, pkt.payload.array, sizeof(SensorArray));
+                has_new_ref_signal = true;
 
-#ifdef TEST_PRINT
-            printf("\nReceived sensor array (%d elements):\n", SENSOR_ARRAY_SIZE);
-            for(int i = 0; i < SENSOR_ARRAY_SIZE; i++) {
-                if(i % 16 == 0) printf(i > 0 ? "\n[%3d-%3d]:" : "[%3d-%3d]:", i, i + 15);
-                printf(" %X", pkt.payload.array[i]);
+            } else if(msg_type == MSG_ERR_ARRAY) {
+                int wait = 10000;
+                while(has_new_err_signal == true) {
+                    wait--;
+                    if(wait < 0) {
+                        printf("WARNING: array processing unfinished!");
+                        break;
+                    }
+                }
+                memcpy(err_signal_array, pkt.payload.array, sizeof(SensorArray));
+                has_new_err_signal = true;
             }
-            printf("\n");
-#else
-            if(has_new_array == true) {
-                printf("WARNING: array processing unfinished!")
-            } else {
-                memcpy(sensor_array, pkt.payload.array, sizeof(SensorArray));
-                has_new_array = true;
-            }
-#endif
             memmove(recv_buffer, recv_buffer + pkt_size, bytes_received - pkt_size);
             bytes_received -= pkt_size;
         }
@@ -277,9 +288,9 @@ int start_rpmsg(void)
     }
 
     // 等待线程结束（通常不会发生）
-    pthread_join(cmd_send_thread, NULL);
-    pthread_join(print_thread, NULL);
+    // pthread_join(cmd_send_thread, NULL);
+    // pthread_join(print_thread, NULL);
+    // close(rpmsg_fd);
 
-    close(rpmsg_fd);
     return EXIT_SUCCESS;
 }

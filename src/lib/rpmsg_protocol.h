@@ -16,7 +16,8 @@ typedef enum {
 typedef enum {
     MSG_COMMAND       = 0xA1, // Linux->实时端: 控制指令
     MSG_SET_PARAM     = 0xB1, // Linux->实时端: 参数设置
-    MSG_SENSOR_ARRAY  = 0xC1  // 实时端->Linux: 传感器数组
+    MSG_REF_ARRAY  = 0xC1,  // 实时端->Linux: 参考信号数组
+    MSG_ERR_ARRAY  = 0xC2   // 实时端->Linux: 误差信号数组
 } msg_Type;
 
 typedef enum 
@@ -33,8 +34,9 @@ typedef struct {
 } ParamPayload;
 
 // 传感器数组负载结构
-#define SENSOR_ARRAY_SIZE 200
-typedef uint16_t SensorArray[SENSOR_ARRAY_SIZE];
+#define REF_SIGNAL_ARRAY_SIZE 200
+#define ERR_SIGNAL_ARRAY_SIZE 200
+typedef uint16_t SensorArray[REF_SIGNAL_ARRAY_SIZE];
 #pragma pack(pop)
 
 // 数据包通用结构
@@ -43,6 +45,6 @@ typedef struct {
     union {
         uint16_t command;       // MSG_COMMAND负载
         ParamPayload param;    // MSG_SET_PARAM负载
-        SensorArray array;     // MSG_SENSOR_ARRAY负载
+        SensorArray array;     // MSG_REF_ARRAY负载
     } payload;
 } rpmsg_packet;
