@@ -3,6 +3,10 @@
         "*.dts": "c",
         "*.ld": "c",
         "linux_msg.h": "c",
-        "lv_demos.h": "c"
-    }
+        "lv_demos.h": "c",
+        "rpmsg_protocol.h": "c",
+        "string.h": "c",
+        "stdlib.h": "c"
+    },
+    "C_Cpp.errorSquiggles": "disabled"
 }

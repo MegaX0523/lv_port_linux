@@ -1,26 +1,38 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <pthread.h>
-#include <unistd.h>
 #include <stdbool.h>
 #include <fcntl.h>
 #include <termios.h>
 #include <errno.h>
 #include <string.h>
+#include <time.h>
 #include <sys/poll.h>
+#include "lvgl/lvgl.h"
 #include "linux_msg.h"
 #include "rpmsg_protocol.h"
 
 #define MSG_PATH "/dev/ttyRPMSG0"
-// #define TEST_PRINT
+#define Y_SCALE 1024
 
 // 全局变量
 int rpmsg_fd;
-bool has_new_ref_signal       = false;
-bool has_new_err_signal       = false;
-pthread_mutex_t g_mutex_lock  = PTHREAD_MUTEX_INITIALIZER; // 保护send_msg调用
-int16_t ref_signal_array[200] = {0};
-int16_t err_signal_array[200] = {0};
+bool has_new_ref_signal                             = false;
+bool has_new_err_signal                             = false;
+pthread_mutex_t g_mutex_lock                        = PTHREAD_MUTEX_INITIALIZER; // 保护send_msg调用
+int16_t ref_signal_array[200]                       = {0};
+int16_t err_signal_array[200]                       = {0};
+double ref_voltage[REF_SIGNAL_ARRAY_SIZE]           = {0.0};
+double err_voltage[REF_SIGNAL_ARRAY_SIZE]           = {0.0};
+int32_t converted_ref_values[REF_SIGNAL_ARRAY_SIZE] = {0};
+int32_t converted_err_values[ERR_SIGNAL_ARRAY_SIZE] = {0};
+double ref_max_val                                  = -10.0;
+double ref_min_val                                  = 10.0;
+double err_max_val                                  = -10.0;
+double err_min_val                                  = 10.0;
+
+extern lv_obj_t * ref_label;
+extern lv_obj_t * err_label;
 
 // 设置TTY为原始模式
 int set_tty_raw(int fd)
@@ -92,6 +104,22 @@ int send_msg(int cmd_type, u_int16_t param_id, double param_value)
             printf("Sending: Stop control...\n");
             break;
         }
+        case CMD_START_IDENTIFY: // start identify
+        {
+            pkt.msg_type        = MSG_COMMAND;
+            pkt.payload.command = START_SP_IDENTIFY;
+            pkt_size            = sizeof(pkt.msg_type) + sizeof(u_int16_t);
+            printf("Sending: Start identify...\n");
+            break;
+        }
+        case CMD_STOP_IDENTIFY: // stop identify
+        {
+            pkt.msg_type        = MSG_COMMAND;
+            pkt.payload.command = STOP_SP_IDENTIFY;
+            pkt_size            = sizeof(pkt.msg_type) + sizeof(u_int16_t);
+            printf("Sending: Stop identify...\n");
+            break;
+        }
         case CMD_SET_PARAM: // Set Parameter
         {
             pkt.msg_type                  = MSG_SET_PARAM;
@@ -146,8 +174,10 @@ void * cmd_send_thread_func(void * arg)
                "2: Stop excitation\n"
                "3: Start control\n"
                "4: Stop control\n"
-               "5: Set parameter\n"
-               "6: Request sensor array\n"
+               "5: Start identify\n"
+               "6: Stop identify\n"
+               "7: Set parameter\n"
+               "8: Request sensor array\n"
                "0: Exit\n");
         ret = scanf("%d", &cmd);
         if(ret != 1) {
@@ -158,7 +188,7 @@ void * cmd_send_thread_func(void * arg)
             continue;
         }
 
-        if(cmd != 5) {
+        if(cmd != 7) {
             send_msg(cmd, 0, 0);
         } else {
             u_int16_t param_id;
@@ -179,6 +209,16 @@ void * cmd_send_thread_func(void * arg)
         }
     }
     return NULL;
+}
+
+// 异步回调函数（在主线程中执行）
+void update_label_cb(void * arg)
+{
+    label_update_t * update = (label_update_t *)arg;
+    if(update && update->label) {
+        lv_label_set_text(update->label, update->text);
+    }
+    free(update); // 记得释放内存
 }
 
 void * get_array_thread_func(void * arg)
@@ -238,8 +278,40 @@ void * get_array_thread_func(void * arg)
                     }
                 }
                 memcpy(ref_signal_array, pkt.payload.array, sizeof(SensorArray));
-                has_new_ref_signal = true;
+                static int ref_scale = 1 * (1024 - 20);
+                for(int i = 0; i < REF_SIGNAL_ARRAY_SIZE; i++) {
+                    ref_voltage[i]          = (int16_t)ref_signal_array[i] * 10.0 / 32767.0f; // 32768 = 0x8000
+                    converted_ref_values[i] = (int32_t)(ref_voltage[i] / 10.0 * ref_scale);
+                    if(ref_voltage[i] > ref_max_val) ref_max_val = ref_voltage[i];
+                    if(ref_voltage[i] < ref_min_val) ref_min_val = ref_voltage[i];
+                }
+                // const char* text;
+                // static int ref_divide_now = 1;
+                // static bool ref_need_update = false;
+                // if(ref_divide_now != 5 && ref_max_val < 0.9 && ref_min_val > -0.9) {
+                //     ref_scale = 5 * (Y_SCALE - 20);
+                //     text      = "Ref / 5 / V";
+                //     ref_need_update = true;
+                //     ref_divide_now = 5;
+                // } else if(ref_divide_now != 2 && ref_max_val < 4.0 && ref_min_val > -4.0) {
+                //     ref_scale = 2 * (Y_SCALE - 20);
+                //     text      = "Ref / 2 / V";
+                //     ref_need_update = true;
+                //     ref_divide_now = 2;
+                // } else if(ref_divide_now != 1) {
+                //     ref_scale = 1 * (Y_SCALE - 20);
+                //     text      = "Ref / 1 / V";
+                //     ref_need_update = true;
+                //     ref_divide_now = 1;
+                // }
 
+                // label_update_t * update = malloc(sizeof(label_update_t));
+                // if(update && ref_need_update) {
+                //     update->label = ref_label;
+                //     update->text  = text;
+                //     lv_async_call(update_label_cb, update);
+                // }
+                has_new_ref_signal = true;
             } else if(msg_type == MSG_ERR_ARRAY) {
                 int wait = 10000;
                 while(has_new_err_signal == true) {
@@ -250,6 +322,39 @@ void * get_array_thread_func(void * arg)
                     }
                 }
                 memcpy(err_signal_array, pkt.payload.array, sizeof(SensorArray));
+                static int err_scale = 1 * (Y_SCALE - 20);
+                for(int i = 0; i < ERR_SIGNAL_ARRAY_SIZE; i++) {
+                    err_voltage[i]          = (int16_t)err_signal_array[i] * 10.0 / 32767.0f; // 32768 = 0x8000
+                    converted_err_values[i] = (int32_t)(err_voltage[i] / 10.0 * err_scale);
+                    if(err_voltage[i] > err_max_val) err_max_val = err_voltage[i];
+                    if(err_voltage[i] < err_min_val) err_min_val = err_voltage[i];
+                }
+                // const char* text;
+                // static int err_divide_now = 1;
+                // static bool err_need_update = false;
+                // if(err_divide_now != 5 && err_max_val < 0.9 && err_min_val > -0.9) {
+                //     err_scale = 5 * (Y_SCALE - 20);
+                //     text      = "Err / 5 / V";
+                //     err_need_update = true;
+                //     err_divide_now = 5;
+                // } else if(err_divide_now != 2 && err_max_val < 4.0 && err_min_val > -4.0) {
+                //     err_scale = 2 * (Y_SCALE - 20);
+                //     text      = "Err / 2 / V";
+                //     err_need_update = true;
+                //     err_divide_now = 2;
+                // } else if(err_divide_now != 1) {
+                //     err_scale = 1 * (Y_SCALE - 20);
+                //     text      = "Err / 1 / V";
+                //     err_need_update = true;
+                //     err_divide_now = 1;
+                // }
+
+                // label_update_t * update = malloc(sizeof(label_update_t));
+                // if(update && err_need_update) {
+                //     update->label = err_label;
+                //     update->text  = text;
+                //     lv_async_call(update_label_cb, update);
+                // }
                 has_new_err_signal = true;
             }
             memmove(recv_buffer, recv_buffer + pkt_size, bytes_received - pkt_size);
@@ -262,7 +367,7 @@ void * get_array_thread_func(void * arg)
 
 int start_rpmsg(void)
 {
-    // 打开设备
+    // 打开rpmsg设备
     rpmsg_fd = open(MSG_PATH, O_RDWR | O_NONBLOCK | O_NOCTTY);
     if(rpmsg_fd < 0) {
         perror("Failed to open message path");
@@ -277,6 +382,30 @@ int start_rpmsg(void)
         printf("TTY raw mode configured successfully\n");
     }
 
+    time_t rawtime;
+    struct tm * timeinfo;
+    char filename[80];
+
+    time(&rawtime);
+    timeinfo = localtime(&rawtime);
+
+    // 格式化时间为文件名：年-月-日_时-分-秒.txt
+    strftime(filename, sizeof(filename), "%Y-%m-%d_%H-%M-%S.txt", timeinfo);
+
+    // 创建并打开文件
+    FILE * file = fopen(filename, "w");
+    if(file == NULL) {
+        perror("File creation failed");
+        return 1;
+    }
+
+    fprintf(file, "File creation time: %s\n", asctime(timeinfo));
+    fprintf(file, "This is automatically generated file content\n");
+    fprintf(file, "Timestamp: %ld\n", rawtime);
+
+    // 关闭文件
+    fclose(file);
+
     // 创建两个线程：命令输入/发送线程、打印线程
     pthread_t cmd_send_thread, print_thread;
 
@@ -286,11 +415,6 @@ int start_rpmsg(void)
         close(rpmsg_fd);
         return EXIT_FAILURE;
     }
-
-    // 等待线程结束（通常不会发生）
-    // pthread_join(cmd_send_thread, NULL);
-    // pthread_join(print_thread, NULL);
-    // close(rpmsg_fd);
 
     return EXIT_SUCCESS;
 }

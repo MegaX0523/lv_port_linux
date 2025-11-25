@@ -8,8 +8,9 @@ typedef enum {
     STOP_EXCITATION  = 0xC2,
     START_CONTROL   = 0xC3, // 控制激励
     STOP_CONTROL    = 0xC4, // 停止控制
-    START_DAMPING    = 0xC5,
-    STOP_DAMPING     = 0xC6
+    START_SP_IDENTIFY = 0xC5, // 开始次级通道辨识
+    STOP_SP_IDENTIFY  = 0xC6, // 停止次级通道辨识
+    START_DAMPING    = 0xC7
 } cmd_type;
 
 // 消息类型定义 (双向独立)

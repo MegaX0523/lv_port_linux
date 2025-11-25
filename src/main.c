@@ -13,31 +13,38 @@
 #include <fcntl.h>
 #include "lib/linux_msg.h"
 
-#define USING_MOUSE 0
-#define USING_TOUCHSCREEN 1
-
 #define PI 3.14159265358979323846
 #define REFRESH_TIME 100 // 刷新周期 ms
-
-#define DISPLAY_DISPLAY_COUNT 200 // 显示据点个数
-#define Y_SCALE 1024              // Y轴缩放因子（实际值放大1024倍处理浮点）
 #define CHART_WIDTH (LV_HOR_RES - 200)
-#define CHART_HEIGHT (LV_VER_RES - 500)
-#define CHART_BOTTOM_MARGIN 100
-#define GRID_X_COUNT 5 // X轴网格线数量
-#define GRID_Y_COUNT 4 // Y轴网格线数量
-#define TOUCH_DEBOUNCE_MS 20
+#define CHART_HEIGHT (LV_VER_RES - 350)
+#define Y_SCALE 1024 // Y轴缩放因子（实际值放大1024倍处理浮点）
+
+const int16_t DISPLAY_DISPLAY_COUNT = 200; // 显示点个数
+const int16_t CHART_BOTTOM_MARGIN   = 100;
+const int16_t GRID_X_COUNT          = 5; // X轴网格线数量
+const int16_t GRID_Y_COUNT          = 4; // Y轴网格线数量
+const uint16_t TOUCH_DEBOUNCE_MS    = 20;
 
 // 全局变量
 static lv_obj_t * chart;
-static lv_timer_t * update_timer;
+static lv_obj_t * btn_container;
+static lv_obj_t * data_label;
+static lv_timer_t * chart_timer;
+static lv_timer_t * refresh_timer;
 static lv_chart_series_t * ref_signal_line;
 static lv_chart_series_t * err_signal_line;
 static lv_display_t * disp;
+lv_obj_t * ref_label;
+lv_obj_t * err_label;
+
 extern bool has_new_ref_signal;
 extern bool has_new_err_signal;
-extern int16_t ref_signal_array[200];
-extern int16_t err_signal_array[200];
+extern int32_t converted_ref_values[200];
+extern int32_t converted_err_values[200];
+extern double ref_max_val;
+extern double ref_min_val;
+extern double err_max_val;
+extern double err_min_val;
 
 typedef struct
 {
@@ -64,27 +71,15 @@ void get_sin_array(int16_t * array, size_t size, double frequency, double amplit
 void update_chart(lv_timer_t * timer)
 {
     (void)timer;
-    float voltage;
-    static int32_t converted_ref_values[DISPLAY_DISPLAY_COUNT];
-    static int32_t converted_err_values[DISPLAY_DISPLAY_COUNT];
 
     // 转换传感器数据
     if(has_new_ref_signal == true) {
-        for(int i = 0; i < DISPLAY_DISPLAY_COUNT; i++) {
-            voltage                 = (int)ref_signal_array[i] * 10.0 / 32767.0f; // 32768 = 0x8000
-            converted_ref_values[i] = (int32_t)(voltage / 10.0 * (Y_SCALE - 20));
-        }
         has_new_ref_signal = false;
-
         lv_chart_set_series_values(chart, ref_signal_line, converted_ref_values, DISPLAY_DISPLAY_COUNT);
         lv_chart_refresh(chart);
     }
 
     if(has_new_err_signal == true) {
-        for(int i = 0; i < DISPLAY_DISPLAY_COUNT; i++) {
-            voltage = (int)err_signal_array[i + DISPLAY_DISPLAY_COUNT] * 10.0 / 32767.0f; // 32768 = 0x8000
-            converted_err_values[i] = (int32_t)(voltage / 10.0 * (Y_SCALE - 20));
-        }
         has_new_err_signal = false;
 
         lv_chart_set_series_values(chart, err_signal_line, converted_err_values, DISPLAY_DISPLAY_COUNT);
@@ -92,45 +87,11 @@ void update_chart(lv_timer_t * timer)
     }
 }
 
-// 按钮事件处理
-void btn_event_handler(lv_event_t * e)
-{
-    lv_obj_t * btn     = lv_event_get_target(e);
-    const char * label = lv_label_get_text(lv_obj_get_child(btn, 0));
-
-    if(strcmp(label, "Start excitation") == 0) {
-        if(update_timer) {
-            lv_timer_resume(update_timer);
-        } else {
-            update_timer = lv_timer_create(update_chart, REFRESH_TIME, NULL);
-            if(update_timer == NULL) {
-                printf("Error: Failed to create update timer\n");
-                return;
-            }
-        }
-        send_msg(CMD_START_EXCITATION, 0, 0);
-    } else if(strcmp(label, "Stop excitation") == 0) {
-        if(update_timer) {
-            lv_timer_pause(update_timer);
-        }
-        send_msg(CMD_STOP_EXCITATION, 0, 0);
-    } else if(strcmp(label, "Start control") == 0) {
-        send_msg(CMD_START_CONTROL, 0, 0);
-    } else if(strcmp(label, "Stop control") == 0) {
-        send_msg(CMD_STOP_CONTROL, 0, 0);
-    }
-}
-
+// 显示坐标轴数据
 void create_axis_labels()
 {
-    // static lv_color_t color_red;
-    // static lv_color_t color_blue;
-    // static lv_color_t color_green;
     static lv_color_t color_black;
 
-    // color_red   = lv_color_hex(0xFF0000); // 红色
-    // color_blue  = lv_color_hex(0x0000FF); // 蓝色
-    // color_green = lv_color_hex(0x00FF00); // 绿色
     color_black = lv_color_hex(0x000000); // 黑色
     // 获取图表位置和尺寸
     lv_area_t chart_area;
@@ -209,44 +170,67 @@ void create_chart(void)
     lv_chart_set_all_value(chart, err_signal_line, 0);
 
     // -------------------------- 手动创建图例（无legend组件适配） --------------------------
-    // 1. 创建图例容器（父组件为屏幕，统一管理条目）
+    // 1. 创建图例容器（核心紧凑化配置）
     lv_obj_t * legend_container = lv_obj_create(lv_scr_act());
-    lv_obj_set_size(legend_container, 300, 40); // 容器大小（适配2个条目）
-    lv_obj_set_flex_flow(legend_container, LV_FLEX_FLOW_ROW); // 水平排列条目
-    lv_obj_set_flex_align(legend_container, LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER); // 均匀分布+垂直居中
-    lv_obj_align_to(legend_container, chart, LV_ALIGN_TOP_MID, 0, -10); // 相对于图表顶部居中，上偏10px
+    lv_obj_set_size(legend_container, LV_SIZE_CONTENT, LV_SIZE_CONTENT); // 尺寸完全自适应内容（无多余空间）
+    lv_obj_set_flex_flow(legend_container, LV_FLEX_FLOW_COLUMN);         // 垂直排列
 
-    // 2. 可选：容器样式（白色半透明背景，圆角）
+    // 2. 容器样式（保持不变，或微调padding）
     lv_obj_set_style_bg_color(legend_container, lv_color_white(), LV_STATE_DEFAULT);
     lv_obj_set_style_bg_opa(legend_container, LV_OPA_70, LV_STATE_DEFAULT);
-    lv_obj_set_style_radius(legend_container, 6, LV_STATE_DEFAULT);
-    lv_obj_set_style_pad_all(legend_container, 4, LV_STATE_DEFAULT);
+    lv_obj_set_style_pad_all(legend_container, 0, LV_STATE_DEFAULT);    // 内边距设为0
+    lv_obj_set_style_border_side(legend_container, LV_BORDER_SIDE_NONE, LV_STATE_DEFAULT);
+    lv_obj_set_flex_align(legend_container, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+    lv_obj_align_to(legend_container, chart, LV_ALIGN_TOP_RIGHT, -220, 10);
 
     // 3. 创建第一个条目：参考信号（红色）
-    // 3.1 颜色块（小矩形，模拟legend颜色标识）
-    lv_obj_t * ref_color_block = lv_obj_create(legend_container);
-    lv_obj_set_size(ref_color_block, 16, 16); // 颜色块大小（16x16px，醒目）
-    lv_obj_set_style_bg_color(ref_color_block, lv_palette_main(LV_PALETTE_RED), LV_STATE_DEFAULT); // 复用数据线颜色
-    lv_obj_set_style_bg_opa(ref_color_block, LV_OPA_100, LV_STATE_DEFAULT);
-    lv_obj_set_style_radius(ref_color_block, 2, LV_STATE_DEFAULT); // 轻微圆角
+    lv_obj_t * ref_container = lv_obj_create(legend_container);
+    // 关键修改：不设置固定宽度（让flex自动分配），高度自适应内容
+    lv_obj_set_size(ref_container, LV_SIZE_CONTENT, 30);
+    lv_obj_set_flex_flow(ref_container, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(ref_container, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_border_width(ref_container, 0, LV_STATE_DEFAULT);
+    lv_obj_set_style_border_side(ref_container, LV_BORDER_SIDE_NONE, LV_STATE_DEFAULT);
+    lv_obj_set_style_bg_opa(ref_container, LV_OPA_0, LV_STATE_DEFAULT); // 透明背景（替代移除所有样式）
 
-    // 3.2 文本标签
-    lv_obj_t * ref_label = lv_label_create(legend_container);
-    lv_label_set_text(ref_label, "Reference Signal"); // 英文名称（中文："参考信号"）
-    lv_obj_set_style_text_font(ref_label, &lv_font_montserrat_16, LV_STATE_DEFAULT); // 字体大小
+    // 3.1 颜色块（保持不变，或微调尺寸）
+    lv_obj_t * ref_color_block = lv_obj_create(ref_container);
+    lv_obj_set_size(ref_color_block, 50, 5);
+    lv_obj_set_style_bg_color(ref_color_block, lv_palette_main(LV_PALETTE_RED), LV_STATE_DEFAULT);
+    lv_obj_set_style_bg_opa(ref_color_block, LV_OPA_100, LV_STATE_DEFAULT);
+    lv_obj_set_style_radius(ref_color_block, 2, LV_STATE_DEFAULT);
+    lv_obj_set_style_margin_right(ref_color_block, 8, LV_STATE_DEFAULT); // 微调间距
+
+    // 3.2 文本标签（关键：使用默认字体测试，避免字体问题）
+    ref_label = lv_label_create(ref_container);
+    lv_label_set_text(ref_label, "Ref Signal"); // 简化文本，减少宽度占用
+    // 优先使用默认字体（确保显示），后续可换回自定义字体
+    lv_obj_set_style_text_font(ref_label, &lv_font_montserrat_22, LV_STATE_DEFAULT);
+    lv_obj_set_style_text_color(ref_label, lv_color_black(), LV_STATE_DEFAULT); // 明确文本颜色，避免透明
 
     // 4. 创建第二个条目：误差信号（蓝色）
-    // 4.1 颜色块
-    lv_obj_t * err_color_block = lv_obj_create(legend_container);
-    lv_obj_set_size(err_color_block, 16, 16);
-    lv_obj_set_style_bg_color(err_color_block, lv_palette_main(LV_PALETTE_BLUE), LV_STATE_DEFAULT); // 复用数据线颜色
+    lv_obj_t * err_container = lv_obj_create(legend_container);
+    // 同第一个条目：宽度自适应，高度自适应
+    lv_obj_set_size(err_container, LV_SIZE_CONTENT, 30);
+    lv_obj_set_flex_flow(err_container, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(err_container, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_border_width(err_container, 0, LV_STATE_DEFAULT);
+    lv_obj_set_style_border_side(err_container, LV_BORDER_SIDE_NONE, LV_STATE_DEFAULT);
+    lv_obj_set_style_bg_opa(err_container, LV_OPA_70, LV_STATE_DEFAULT);
+
+    // 4.1 颜色块（保持不变）
+    lv_obj_t * err_color_block = lv_obj_create(err_container);
+    lv_obj_set_size(err_color_block, 50, 5);
+    lv_obj_set_style_bg_color(err_color_block, lv_palette_main(LV_PALETTE_BLUE), LV_STATE_DEFAULT);
     lv_obj_set_style_bg_opa(err_color_block, LV_OPA_100, LV_STATE_DEFAULT);
     lv_obj_set_style_radius(err_color_block, 2, LV_STATE_DEFAULT);
+    lv_obj_set_style_margin_right(err_color_block, 8, LV_STATE_DEFAULT);
 
-    // 4.2 文本标签
-    lv_obj_t * err_label = lv_label_create(legend_container);
-    lv_label_set_text(err_label, "Error Signal"); // 英文名称（中文："误差信号"）
-    lv_obj_set_style_text_font(err_label, &lv_font_montserrat_16, LV_STATE_DEFAULT);
+    // 4.2 文本标签（同第一个条目，简化文本+默认字体）
+    err_label = lv_label_create(err_container);
+    lv_label_set_text(err_label, "Err Signal"); // 简化文本
+    lv_obj_set_style_text_font(err_label, &lv_font_montserrat_22, LV_STATE_DEFAULT);
+    lv_obj_set_style_text_color(err_label, lv_color_black(), LV_STATE_DEFAULT);
     // --------------------------------------------------------------------------------
 
     lv_obj_update_layout(chart);
@@ -308,41 +292,6 @@ bool touchpad_init(void)
 // 输入设备回调函数
 void indev_callback(lv_indev_t * indev, lv_indev_data_t * data)
 {
-#if USING_MOUSE
-    static int16_t last_x        = 0;
-    static int16_t last_y        = 0;
-    static bool left_button_down = false;
-
-    struct input_event in;
-    static int fd = -1;
-
-    if(fd < 0) {
-        fd = open("/dev/input/mouse", O_RDONLY | O_NONBLOCK);
-        if(fd < 0) {
-            perror("Failed to open mouse device");
-            data->point.x = last_x;
-            data->point.y = last_y;
-            data->state   = LV_INDEV_STATE_RELEASED;
-            return;
-        }
-    }
-
-    while(read(fd, &in, sizeof(struct input_event)) > 0) {
-        if(in.type == EV_REL) {
-            if(in.code == REL_X)
-                last_x += in.value;
-            else if(in.code == REL_Y)
-                last_y += in.value;
-        } else if(in.type == EV_KEY && in.code == BTN_LEFT) {
-            left_button_down = (in.value != 0);
-        }
-    }
-
-    // 更新LVGL输入数据
-    data->point.x = last_x;
-    data->point.y = last_y;
-    data->state   = left_button_down ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED;
-#elif USING_TOUCHSCREEN
     static int16_t last_x           = 0;
     static int16_t last_y           = 0;
     static bool touched             = false;
@@ -394,41 +343,58 @@ void indev_callback(lv_indev_t * indev, lv_indev_data_t * data)
             }
         }
     }
-
     // 更新LVGL数据
     data->point.x = last_x;
     data->point.y = last_y;
     data->state   = touched ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED;
-#endif
 }
 
 // 初始化输入设备
 void input_evdev_init(void)
 {
-#if USING_MOUSE
-    lv_indev_t * mouse;
-    lv_obj_t cursor_obj;
-
-    mouse = lv_evdev_create(LV_INDEV_TYPE_POINTER, "/dev/input/event0");
-    lv_indev_set_display(mouse, disp);
-    lv_indev_set_read_cb(mouse_indev, indev_callback);
-    LV_IMAGE_DECLARE(mouse_cursor_icon);
-    cursor_obj = lv_image_create(lv_screen_active());
-    lv_image_set_src(cursor_obj, &mouse_cursor_icon);
-    lv_indev_set_cursor(mouse, cursor_obj);
-#elif USING_TOUCHSCREEN
     lv_indev_t * touch = lv_evdev_create(LV_INDEV_TYPE_POINTER, "/dev/input/touchscreen0");
     lv_indev_set_display(touch, disp);
     lv_indev_set_read_cb(touch, indev_callback);
+}
 
-#endif
+// 按钮事件处理
+void btn_event_handler(lv_event_t * e)
+{
+    lv_obj_t * btn     = lv_event_get_target(e);
+    const char * label = lv_label_get_text(lv_obj_get_child(btn, 0));
+
+    if(strcmp(label, "Start excitation") == 0) {
+        if(chart_timer) {
+            lv_timer_resume(chart_timer);
+        } else {
+            chart_timer = lv_timer_create(update_chart, REFRESH_TIME, NULL);
+            if(chart_timer == NULL) {
+                printf("Error: Failed to create update timer\n");
+                return;
+            }
+        }
+        send_msg(CMD_START_EXCITATION, 0, 0);
+    } else if(strcmp(label, "Stop excitation") == 0) {
+        if(chart_timer) {
+            lv_timer_pause(chart_timer);
+        }
+        send_msg(CMD_STOP_EXCITATION, 0, 0);
+    } else if(strcmp(label, "Start control") == 0) {
+        send_msg(CMD_START_CONTROL, 0, 0);
+    } else if(strcmp(label, "Stop control") == 0) {
+        send_msg(CMD_STOP_CONTROL, 0, 0);
+    } else if(strcmp(label, "Start identify") == 0) {
+        send_msg(CMD_START_IDENTIFY, 0, 0);
+    } else if(strcmp(label, "Stop identify") == 0) {
+        send_msg(CMD_STOP_IDENTIFY, 0, 0);
+    }
 }
 
 // 创建UI界面
 void create_button_ui(void)
 {
     // 创建按钮容器
-    lv_obj_t * btn_container = lv_obj_create(lv_scr_act());
+    btn_container = lv_obj_create(lv_scr_act());
     lv_obj_set_size(btn_container, LV_HOR_RES - 200, 160);
     lv_obj_set_flex_flow(btn_container, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(btn_container, LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
@@ -440,9 +406,8 @@ void create_button_ui(void)
     lv_obj_set_style_bg_color(btn_start_excitation, lv_palette_lighten(LV_PALETTE_BLUE, 3), LV_STATE_DEFAULT);
     lv_obj_set_style_bg_opa(btn_start_excitation, LV_OPA_100, LV_STATE_DEFAULT);
     lv_obj_add_event_cb(btn_start_excitation, btn_event_handler, LV_EVENT_CLICKED, NULL);
-    // 添加文本信息
     lv_obj_t * label_start_excitation = lv_label_create(btn_start_excitation);
-    lv_label_set_text(label_start_excitation, "Start excitation");                           // 设置文本
+    lv_label_set_text(label_start_excitation, "Start\nexcitation");                          // 设置文本
     lv_obj_set_style_text_font(label_start_excitation, &lv_font_montserrat_22, 0);           // 设置字体
     lv_obj_set_style_text_color(label_start_excitation, lv_color_black(), LV_STATE_DEFAULT); // 文本颜色黑色
     lv_obj_center(label_start_excitation);                                                   // 文本居中
@@ -454,7 +419,7 @@ void create_button_ui(void)
     lv_obj_set_style_bg_opa(btn_stop_excitation, LV_OPA_100, LV_STATE_DEFAULT);
     lv_obj_add_event_cb(btn_stop_excitation, btn_event_handler, LV_EVENT_CLICKED, NULL);
     lv_obj_t * label_stop_excitation = lv_label_create(btn_stop_excitation);
-    lv_label_set_text(label_stop_excitation, "Stop excitation");
+    lv_label_set_text(label_stop_excitation, "Stop\nexcitation");
     lv_obj_set_style_text_font(label_stop_excitation, &lv_font_montserrat_22, 0);
     lv_obj_set_style_text_color(label_stop_excitation, lv_color_black(), LV_STATE_DEFAULT);
     lv_obj_center(label_stop_excitation);
@@ -466,7 +431,7 @@ void create_button_ui(void)
     lv_obj_set_style_bg_color(btn_start_control, lv_palette_lighten(LV_PALETTE_BLUE, 3), LV_STATE_DEFAULT);
     lv_obj_set_style_bg_opa(btn_start_control, LV_OPA_100, LV_STATE_DEFAULT);
     lv_obj_t * label_start_control = lv_label_create(btn_start_control);
-    lv_label_set_text(label_start_control, "Start control");
+    lv_label_set_text(label_start_control, "Start\ncontrol");
     lv_obj_set_style_text_font(label_start_control, &lv_font_montserrat_22, 0);
     lv_obj_set_style_text_color(label_start_control, lv_color_black(), LV_STATE_DEFAULT);
     lv_obj_center(label_start_control);
@@ -478,13 +443,70 @@ void create_button_ui(void)
     lv_obj_set_style_bg_color(btn_stop_control, lv_palette_lighten(LV_PALETTE_BLUE, 3), LV_STATE_DEFAULT);
     lv_obj_set_style_bg_opa(btn_stop_control, LV_OPA_100, LV_STATE_DEFAULT);
     lv_obj_t * label_stop_control = lv_label_create(btn_stop_control);
-    lv_label_set_text(label_stop_control, "Stop control");
+    lv_label_set_text(label_stop_control, "Stop\ncontrol");
     lv_obj_set_style_text_font(label_stop_control, &lv_font_montserrat_22, 0);
     lv_obj_set_style_text_color(label_stop_control, lv_color_black(), LV_STATE_DEFAULT);
     lv_obj_center(label_stop_control);
+
+    // 开始辨识按钮
+    lv_obj_t * btn_start_identify = lv_btn_create(btn_container);
+    lv_obj_set_size(btn_start_identify, 200, 120);
+    lv_obj_add_event_cb(btn_start_identify, btn_event_handler, LV_EVENT_CLICKED, NULL);
+    lv_obj_set_style_bg_color(btn_start_identify, lv_palette_lighten(LV_PALETTE_BLUE, 3), LV_STATE_DEFAULT);
+    lv_obj_set_style_bg_opa(btn_start_identify, LV_OPA_100, LV_STATE_DEFAULT);
+    lv_obj_t * label_start_identify = lv_label_create(btn_start_identify);
+    lv_label_set_text(label_start_identify, "Start\nidentify");
+    lv_obj_set_style_text_font(label_start_identify, &lv_font_montserrat_22, 0);
+    lv_obj_set_style_text_color(label_start_identify, lv_color_black(), LV_STATE_DEFAULT);
+    lv_obj_center(label_start_identify);
+
+    // 结束辨识按钮
+    lv_obj_t * btn_stop_identify = lv_btn_create(btn_container);
+    lv_obj_set_size(btn_stop_identify, 200, 120);
+    lv_obj_add_event_cb(btn_stop_identify, btn_event_handler, LV_EVENT_CLICKED, NULL);
+    lv_obj_set_style_bg_color(btn_stop_identify, lv_palette_lighten(LV_PALETTE_BLUE, 3), LV_STATE_DEFAULT);
+    lv_obj_set_style_bg_opa(btn_stop_identify, LV_OPA_100, LV_STATE_DEFAULT);
+    lv_obj_t * label_stop_identify = lv_label_create(btn_stop_identify);
+    lv_label_set_text(label_stop_identify, "Stop\nidentify");
+    lv_obj_set_style_text_font(label_stop_identify, &lv_font_montserrat_22, 0);
+    lv_obj_set_style_text_color(label_stop_identify, lv_color_black(), LV_STATE_DEFAULT);
+    lv_obj_center(label_stop_identify);
 }
 
-// 主函数
+static void data_refresh_cb(lv_timer_t * timer)
+{
+    (void)timer;
+    lv_label_set_text_fmt(data_label, "Ref Signal: Max=%8.5f,\t Min=%8.5f\t   Err Signal: Max=%8.5f,\t Min=%8.5f",
+                          ref_max_val, ref_min_val, err_max_val, err_min_val);
+    ref_max_val = -10.0;
+    ref_min_val = 10.0;
+    err_max_val = -10.0;
+    err_min_val = 10.0;
+}
+
+void create_data_ui(void)
+{
+    // -------------------------- 创建数据显示标签 --------------------------
+    // 1. 创建文本标签（父组件为屏幕，方便定位）
+    data_label = lv_label_create(lv_scr_act());
+
+    // 2. 设置标签位置：按钮容器下方20像素，水平居中
+    lv_obj_align_to(data_label, btn_container, LV_ALIGN_BOTTOM_LEFT, 0, 60);
+
+    // 3. 标签样式（可选，提升可读性）
+    lv_obj_set_style_text_font(data_label, &lv_font_montserrat_24, LV_STATE_DEFAULT); // 字体大小
+    lv_obj_set_style_text_color(data_label, lv_color_black(), LV_STATE_DEFAULT);      // 字体颜色
+    // 可选：添加背景色和圆角
+    // lv_obj_set_style_bg_color(data_label, lv_color_hex(0xFFFFFF), LV_STATE_DEFAULT); // 浅灰色背景
+    lv_obj_set_style_bg_opa(data_label, LV_OPA_80, LV_STATE_DEFAULT); // 80%半透明
+    lv_obj_set_style_radius(data_label, 4, LV_STATE_DEFAULT);         // 4px圆角
+    lv_obj_set_style_pad_all(data_label, 8, LV_STATE_DEFAULT);        // 内边距8px
+
+    // 4. 初始显示文本
+    lv_label_set_text_fmt(data_label, "Ref Signal: Max=%8.5f,\t Min=%8.5f\t\t\t\t\tErr Signal: Max=%8.5f,\t Min=%8.5f",
+                          0.0, 0.0, 0.0, 0.0);
+}
+
 int main(void)
 {
     // 初始化LVGL
@@ -493,13 +515,19 @@ int main(void)
     disp = lv_linux_fbdev_create();
     lv_linux_fbdev_set_file(disp, "/dev/fb0");
 
-    // 创建UI界面
+    // 创建按键UI界面
     create_button_ui();
-    create_chart();
     input_evdev_init();
 
-    update_timer = lv_timer_create(update_chart, REFRESH_TIME, NULL);
-    lv_timer_enable(update_timer); // 启动定时器
+    // 创建波形图
+    create_chart();
+    chart_timer = lv_timer_create(update_chart, REFRESH_TIME, NULL);
+    lv_timer_enable(chart_timer); // 启动定时器
+
+    // 创建数据显示区域
+    create_data_ui();
+    refresh_timer = lv_timer_create(data_refresh_cb, 500, NULL);
+    lv_timer_enable(refresh_timer); // 启动刷新定时器
 
     printf("UI created successfully.\n");
     printf("LV_HOR_RES=%d, LV_VER_RES =%d\n", LV_HOR_RES, LV_VER_RES);
