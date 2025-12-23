@@ -8,6 +8,7 @@
 #include <string.h>
 #include <time.h>
 #include <sys/poll.h>
+#include <stdatomic.h>
 #include "lvgl/lvgl.h"
 #include "linux_msg.h"
 #include "rpmsg_protocol.h"
@@ -17,9 +18,17 @@
 
 // 全局变量
 int rpmsg_fd;
-bool has_new_ref_signal                             = false;
-bool has_new_err_signal                             = false;
-pthread_mutex_t g_mutex_lock                        = PTHREAD_MUTEX_INITIALIZER; // 保护send_msg调用
+FILE * ref_file;
+FILE * err_file;
+
+bool has_new_ref_signal      = false;
+bool has_new_err_signal      = false;
+pthread_mutex_t g_mutex_lock = PTHREAD_MUTEX_INITIALIZER; // 保护send_msg调用
+atomic_bool should_exit      = false;
+pthread_mutex_t io_mutex     = PTHREAD_MUTEX_INITIALIZER;
+pthread_cond_t io_cond       = PTHREAD_COND_INITIALIZER;
+int ongoing_io_count         = 0;
+
 int16_t ref_signal_array[200]                       = {0};
 int16_t err_signal_array[200]                       = {0};
 double ref_voltage[REF_SIGNAL_ARRAY_SIZE]           = {0.0};
@@ -72,56 +81,49 @@ int send_msg(int cmd_type, u_int16_t param_id, double param_value)
     pthread_mutex_lock(&g_mutex_lock);
 
     switch(cmd_type) {
-        case CMD_START_EXCITATION: // Start excitation
-        {
+        case CMD_START_EXCITATION: {
             pkt.msg_type        = MSG_COMMAND;
             pkt.payload.command = START_EXCITATION;
             pkt_size            = sizeof(pkt.msg_type) + sizeof(u_int16_t);
             printf("Sending: Start excitation...\n");
             break;
         }
-        case CMD_STOP_EXCITATION: // Stop excitation
-        {
+        case CMD_STOP_EXCITATION: {
             pkt.msg_type        = MSG_COMMAND;
             pkt.payload.command = STOP_EXCITATION;
             pkt_size            = sizeof(pkt.msg_type) + sizeof(u_int16_t);
             printf("Sending: Stop excitation...\n");
             break;
         }
-        case CMD_START_CONTROL: // start control
-        {
+        case CMD_START_CONTROL: {
             pkt.msg_type        = MSG_COMMAND;
             pkt.payload.command = START_CONTROL;
             pkt_size            = sizeof(pkt.msg_type) + sizeof(u_int16_t);
             printf("Sending: Start control...\n");
             break;
         }
-        case CMD_STOP_CONTROL: // stop control
-        {
+        case CMD_STOP_CONTROL: {
             pkt.msg_type        = MSG_COMMAND;
             pkt.payload.command = STOP_CONTROL;
             pkt_size            = sizeof(pkt.msg_type) + sizeof(u_int16_t);
             printf("Sending: Stop control...\n");
             break;
         }
-        case CMD_START_IDENTIFY: // start identify
-        {
+        case CMD_START_IDENTIFY: {
             pkt.msg_type        = MSG_COMMAND;
             pkt.payload.command = START_SP_IDENTIFY;
             pkt_size            = sizeof(pkt.msg_type) + sizeof(u_int16_t);
             printf("Sending: Start identify...\n");
             break;
         }
-        case CMD_STOP_IDENTIFY: // stop identify
-        {
+        case CMD_STOP_IDENTIFY: {
             pkt.msg_type        = MSG_COMMAND;
             pkt.payload.command = STOP_SP_IDENTIFY;
             pkt_size            = sizeof(pkt.msg_type) + sizeof(u_int16_t);
             printf("Sending: Stop identify...\n");
             break;
         }
-        case CMD_SET_PARAM: // Set Parameter
-        {
+        case CMD_SET_PARAM: {
             pkt.msg_type                  = MSG_SET_PARAM;
             pkt.payload.param.param_id    = param_id;
             pkt.payload.param.param_value = param_value;
@@ -129,8 +131,7 @@ int send_msg(int cmd_type, u_int16_t param_id, double param_value)
             printf("Sending: Set param ID %u to %.2f\n", param_id, param_value);
             break;
         }
-        case CMD_GET_ARRAY: // Request Sensor Array
-        {
+        case CMD_GET_ARRAY: {
             pkt.msg_type        = MSG_COMMAND;
             pkt.payload.command = START_DAMPING; // 假设START_DAMPING用于请求数据
             pkt_size            = sizeof(pkt.msg_type) + sizeof(u_int16_t);
@@ -140,13 +141,20 @@ int send_msg(int cmd_type, u_int16_t param_id, double param_value)
         case 0: // Exit
         {
             printf("Exiting...\n");
+            atomic_store(&should_exit, true);
+            pthread_mutex_lock(&io_mutex);
+            while(ongoing_io_count > 0) {
+                pthread_cond_wait(&io_cond, &io_mutex);
+            }
+            pthread_mutex_unlock(&io_mutex);
             close(rpmsg_fd);
+            fclose(ref_file);
+            fclose(err_file);
             pthread_mutex_unlock(&g_mutex_lock);
             exit(0);
         }
         default: printf("Invalid command.\n"); valid_cmd = false;
     }
-
     int send_result = 0;
     if(valid_cmd) {
         size_t sent = write(rpmsg_fd, &pkt, pkt_size);
@@ -211,16 +219,6 @@ void * cmd_send_thread_func(void * arg)
     return NULL;
 }
 
-// 异步回调函数（在主线程中执行）
-void update_label_cb(void * arg)
-{
-    label_update_t * update = (label_update_t *)arg;
-    if(update && update->label) {
-        lv_label_set_text(update->label, update->text);
-    }
-    free(update); // 记得释放内存
-}
-
 void * get_array_thread_func(void * arg)
 {
     struct pollfd fds     = {.fd = rpmsg_fd, .events = POLLIN};
@@ -230,6 +228,27 @@ void * get_array_thread_func(void * arg)
 
     printf("Sensor monitor thread started\n");
     (void)arg;
+
+    time_t rawtime;
+    struct tm * timeinfo;
+    char filename[80];
+    time(&rawtime);
+    timeinfo = localtime(&rawtime);
+    strftime(filename, sizeof(filename), "./nfsfolder/HI3093/err_data-%H-%M-%S.bin", timeinfo);
+    err_file = fopen(filename, "wb");
+    if(err_file == NULL) {
+        perror("File creation failed");
+        return NULL;
+    }
+    strftime(filename, sizeof(filename), "./nfsfolder/HI3093/ref_data-%H-%M-%S.bin", timeinfo);
+    ref_file = fopen(filename, "wb");
+    if(ref_file == NULL) {
+        perror("File creation failed");
+        fclose(err_file);
+        return NULL;
+    }
+
+    printf("Data files created: %s\n", filename);
 
     while(1) {
         if(poll(&fds, 1, -1) <= 0) {
@@ -249,7 +268,7 @@ void * get_array_thread_func(void * arg)
 
         static bool warn_printed = false;
 
-        while(bytes_received >= sizeof(u_int16_t)) {
+        while(!atomic_load(&should_exit) && bytes_received >= sizeof(u_int16_t)) {
             u_int16_t msg_type;
             memcpy(&msg_type, recv_buffer, sizeof(u_int16_t));
 
@@ -268,6 +287,11 @@ void * get_array_thread_func(void * arg)
 
             rpmsg_packet pkt;
             memcpy(&pkt, recv_buffer, pkt_size);
+
+            pthread_mutex_lock(&io_mutex);
+            ongoing_io_count++;
+            pthread_mutex_unlock(&io_mutex);
+
             if(msg_type == MSG_REF_ARRAY) {
                 int wait = 10000;
                 while(has_new_ref_signal == true) {
@@ -280,37 +304,12 @@ void * get_array_thread_func(void * arg)
                 memcpy(ref_signal_array, pkt.payload.array, sizeof(SensorArray));
                 static int ref_scale = 1 * (1024 - 20);
                 for(int i = 0; i < REF_SIGNAL_ARRAY_SIZE; i++) {
-                    ref_voltage[i]          = (int16_t)ref_signal_array[i] * 10.0 / 32767.0f; // 32768 = 0x8000
+                    ref_voltage[i]          = ref_signal_array[i] * 10.0 / 32767.0f; // 32768 = 0x8000
                     converted_ref_values[i] = (int32_t)(ref_voltage[i] / 10.0 * ref_scale);
                     if(ref_voltage[i] > ref_max_val) ref_max_val = ref_voltage[i];
                     if(ref_voltage[i] < ref_min_val) ref_min_val = ref_voltage[i];
                 }
-                // const char* text;
-                // static int ref_divide_now = 1;
-                // static bool ref_need_update = false;
-                // if(ref_divide_now != 5 && ref_max_val < 0.9 && ref_min_val > -0.9) {
-                //     ref_scale = 5 * (Y_SCALE - 20);
-                //     text      = "Ref / 5 / V";
-                //     ref_need_update = true;
-                //     ref_divide_now = 5;
-                // } else if(ref_divide_now != 2 && ref_max_val < 4.0 && ref_min_val > -4.0) {
-                //     ref_scale = 2 * (Y_SCALE - 20);
-                //     text      = "Ref / 2 / V";
-                //     ref_need_update = true;
-                //     ref_divide_now = 2;
-                // } else if(ref_divide_now != 1) {
-                //     ref_scale = 1 * (Y_SCALE - 20);
-                //     text      = "Ref / 1 / V";
-                //     ref_need_update = true;
-                //     ref_divide_now = 1;
-                // }
-
-                // label_update_t * update = malloc(sizeof(label_update_t));
-                // if(update && ref_need_update) {
-                //     update->label = ref_label;
-                //     update->text  = text;
-                //     lv_async_call(update_label_cb, update);
-                // }
+                fwrite(ref_voltage, sizeof(double), REF_SIGNAL_ARRAY_SIZE, ref_file);
                 has_new_ref_signal = true;
             } else if(msg_type == MSG_ERR_ARRAY) {
                 int wait = 10000;
@@ -324,39 +323,20 @@ void * get_array_thread_func(void * arg)
                 memcpy(err_signal_array, pkt.payload.array, sizeof(SensorArray));
                 static int err_scale = 1 * (Y_SCALE - 20);
                 for(int i = 0; i < ERR_SIGNAL_ARRAY_SIZE; i++) {
-                    err_voltage[i]          = (int16_t)err_signal_array[i] * 10.0 / 32767.0f; // 32768 = 0x8000
+                    err_voltage[i]          = err_signal_array[i] * 10.0 / 32767.0f; // 32768 = 0x8000
                     converted_err_values[i] = (int32_t)(err_voltage[i] / 10.0 * err_scale);
                     if(err_voltage[i] > err_max_val) err_max_val = err_voltage[i];
                     if(err_voltage[i] < err_min_val) err_min_val = err_voltage[i];
                 }
-                // const char* text;
-                // static int err_divide_now = 1;
-                // static bool err_need_update = false;
-                // if(err_divide_now != 5 && err_max_val < 0.9 && err_min_val > -0.9) {
-                //     err_scale = 5 * (Y_SCALE - 20);
-                //     text      = "Err / 5 / V";
-                //     err_need_update = true;
-                //     err_divide_now = 5;
-                // } else if(err_divide_now != 2 && err_max_val < 4.0 && err_min_val > -4.0) {
-                //     err_scale = 2 * (Y_SCALE - 20);
-                //     text      = "Err / 2 / V";
-                //     err_need_update = true;
-                //     err_divide_now = 2;
-                // } else if(err_divide_now != 1) {
-                //     err_scale = 1 * (Y_SCALE - 20);
-                //     text      = "Err / 1 / V";
-                //     err_need_update = true;
-                //     err_divide_now = 1;
-                // }
-
-                // label_update_t * update = malloc(sizeof(label_update_t));
-                // if(update && err_need_update) {
-                //     update->label = err_label;
-                //     update->text  = text;
-                //     lv_async_call(update_label_cb, update);
-                // }
+                fwrite(err_voltage, sizeof(double), ERR_SIGNAL_ARRAY_SIZE, err_file);
                 has_new_err_signal = true;
             }
+
+            pthread_mutex_lock(&io_mutex);
+            ongoing_io_count--;
+            pthread_cond_signal(&io_cond); // 通知等待线程
+            pthread_mutex_unlock(&io_mutex);
+
             memmove(recv_buffer, recv_buffer + pkt_size, bytes_received - pkt_size);
             bytes_received -= pkt_size;
         }
@@ -382,37 +362,14 @@ int start_rpmsg(void)
         printf("TTY raw mode configured successfully\n");
     }
 
-    time_t rawtime;
-    struct tm * timeinfo;
-    char filename[80];
-
-    time(&rawtime);
-    timeinfo = localtime(&rawtime);
-
-    // 格式化时间为文件名：年-月-日_时-分-秒.txt
-    strftime(filename, sizeof(filename), "%Y-%m-%d_%H-%M-%S.txt", timeinfo);
-
-    // 创建并打开文件
-    FILE * file = fopen(filename, "w");
-    if(file == NULL) {
-        perror("File creation failed");
-        return 1;
-    }
-
-    fprintf(file, "File creation time: %s\n", asctime(timeinfo));
-    fprintf(file, "This is automatically generated file content\n");
-    fprintf(file, "Timestamp: %ld\n", rawtime);
-
-    // 关闭文件
-    fclose(file);
-
-    // 创建两个线程：命令输入/发送线程、打印线程
     pthread_t cmd_send_thread, print_thread;
 
     if(pthread_create(&cmd_send_thread, NULL, cmd_send_thread_func, NULL) ||
        pthread_create(&print_thread, NULL, get_array_thread_func, NULL)) {
         perror("Failed to create threads");
         close(rpmsg_fd);
+        fclose(ref_file);
+        fclose(err_file);
         return EXIT_FAILURE;
     }
 

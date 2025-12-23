@@ -408,9 +408,11 @@ void create_button_ui(void)
     lv_obj_add_event_cb(btn_start_excitation, btn_event_handler, LV_EVENT_CLICKED, NULL);
     lv_obj_t * label_start_excitation = lv_label_create(btn_start_excitation);
     lv_label_set_text(label_start_excitation, "Start\nexcitation");                          // 设置文本
-    lv_obj_set_style_text_font(label_start_excitation, &lv_font_montserrat_22, 0);           // 设置字体
+    lv_obj_set_style_text_font(label_start_excitation, &lv_font_montserrat_26, 0);           // 设置字体
     lv_obj_set_style_text_color(label_start_excitation, lv_color_black(), LV_STATE_DEFAULT); // 文本颜色黑色
-    lv_obj_center(label_start_excitation);                                                   // 文本居中
+    lv_obj_set_style_text_align(label_start_excitation, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(label_start_excitation, LV_ALIGN_CENTER, 0, 0);
+    // lv_obj_center(label_start_excitation);                                                   // 文本居中
 
     // 结束激励按钮
     lv_obj_t * btn_stop_excitation = lv_btn_create(btn_container);
@@ -420,7 +422,7 @@ void create_button_ui(void)
     lv_obj_add_event_cb(btn_stop_excitation, btn_event_handler, LV_EVENT_CLICKED, NULL);
     lv_obj_t * label_stop_excitation = lv_label_create(btn_stop_excitation);
     lv_label_set_text(label_stop_excitation, "Stop\nexcitation");
-    lv_obj_set_style_text_font(label_stop_excitation, &lv_font_montserrat_22, 0);
+    lv_obj_set_style_text_font(label_stop_excitation, &lv_font_montserrat_26, 0);
     lv_obj_set_style_text_color(label_stop_excitation, lv_color_black(), LV_STATE_DEFAULT);
     lv_obj_center(label_stop_excitation);
 
@@ -432,7 +434,7 @@ void create_button_ui(void)
     lv_obj_set_style_bg_opa(btn_start_control, LV_OPA_100, LV_STATE_DEFAULT);
     lv_obj_t * label_start_control = lv_label_create(btn_start_control);
     lv_label_set_text(label_start_control, "Start\ncontrol");
-    lv_obj_set_style_text_font(label_start_control, &lv_font_montserrat_22, 0);
+    lv_obj_set_style_text_font(label_start_control, &lv_font_montserrat_26, 0);
     lv_obj_set_style_text_color(label_start_control, lv_color_black(), LV_STATE_DEFAULT);
     lv_obj_center(label_start_control);
 
@@ -444,7 +446,7 @@ void create_button_ui(void)
     lv_obj_set_style_bg_opa(btn_stop_control, LV_OPA_100, LV_STATE_DEFAULT);
     lv_obj_t * label_stop_control = lv_label_create(btn_stop_control);
     lv_label_set_text(label_stop_control, "Stop\ncontrol");
-    lv_obj_set_style_text_font(label_stop_control, &lv_font_montserrat_22, 0);
+    lv_obj_set_style_text_font(label_stop_control, &lv_font_montserrat_26, 0);
     lv_obj_set_style_text_color(label_stop_control, lv_color_black(), LV_STATE_DEFAULT);
     lv_obj_center(label_stop_control);
 
@@ -456,7 +458,7 @@ void create_button_ui(void)
     lv_obj_set_style_bg_opa(btn_start_identify, LV_OPA_100, LV_STATE_DEFAULT);
     lv_obj_t * label_start_identify = lv_label_create(btn_start_identify);
     lv_label_set_text(label_start_identify, "Start\nidentify");
-    lv_obj_set_style_text_font(label_start_identify, &lv_font_montserrat_22, 0);
+    lv_obj_set_style_text_font(label_start_identify, &lv_font_montserrat_26, 0);
     lv_obj_set_style_text_color(label_start_identify, lv_color_black(), LV_STATE_DEFAULT);
     lv_obj_center(label_start_identify);
 
@@ -468,7 +470,7 @@ void create_button_ui(void)
     lv_obj_set_style_bg_opa(btn_stop_identify, LV_OPA_100, LV_STATE_DEFAULT);
     lv_obj_t * label_stop_identify = lv_label_create(btn_stop_identify);
     lv_label_set_text(label_stop_identify, "Stop\nidentify");
-    lv_obj_set_style_text_font(label_stop_identify, &lv_font_montserrat_22, 0);
+    lv_obj_set_style_text_font(label_stop_identify, &lv_font_montserrat_26, 0);
     lv_obj_set_style_text_color(label_stop_identify, lv_color_black(), LV_STATE_DEFAULT);
     lv_obj_center(label_stop_identify);
 }
@@ -526,7 +528,7 @@ int main(void)
 
     // 创建数据显示区域
     create_data_ui();
-    refresh_timer = lv_timer_create(data_refresh_cb, 500, NULL);
+    refresh_timer = lv_timer_create(data_refresh_cb, 1000, NULL);
     lv_timer_enable(refresh_timer); // 启动刷新定时器
 
     printf("UI created successfully.\n");
@@ -542,6 +544,5 @@ int main(void)
         lv_timer_handler();
         usleep(500);
     }
-
     return 0;
 }

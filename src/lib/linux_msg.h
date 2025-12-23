@@ -13,13 +13,8 @@ typedef enum {
     QUIT                 = 0
 } cmd;
 
-typedef struct {
-    lv_obj_t* label;
-    const char* text;
-} label_update_t;
 
 int start_rpmsg(void);
 int send_msg(int cmd_type, u_int16_t param_id, double param_value);
-void update_label_cb(void* arg);
 
 #endif // LINUX_MSG_H
